@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtSvgWidgets import QSvgWidget
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtCore import Qt, QByteArray, QPoint, pyqtSignal, QTimer, QSize, QRect, QRectF
-from PyQt6.QtGui import QAction, QColor, QPalette, QFont, QCursor, QIcon, QPixmap, QImage, QPainter, QPdfWriter, QPageSize
+from PyQt6.QtGui import QAction, QColor, QPalette, QFont, QCursor, QIcon, QPixmap, QImage, QPainter, QPdfWriter, QPageSize, QKeySequence
 
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -48,7 +48,8 @@ from molvector_avogadro import (
     render_avogadro, Molecule, CPK_BASE, CPK_DARK, VDW_RADII,
     lighten, darken, hex_to_rgb, rgb_to_hex, auto_dark,
     chemical_formula, molecular_mass, VibrationalMode, ExcitedState,
-    save_xyz, save_gaussian_input, save_pdb,
+    save_xyz, save_gaussian_input, save_pdb, project_molecule, Atom, Bond,
+    optimize_geometry,
 )
 
 def get_safe_filename(name: str) -> str:
@@ -200,6 +201,18 @@ def get_stylesheet(theme_name: str) -> str:
     }}
     QLabel#hint {{
         color:{t['FG_DIM']}; font-size:10px; line-height:160%;
+    }}
+    QToolBar {{
+        background:{t['PANEL_BG']}; border-bottom:1px solid {t['BORDER']};
+        spacing: 4px; padding: 2px;
+    }}
+    QToolButton {{
+        border-radius: 4px; padding: 4px; color: {t['FG']};
+    }}
+    QToolButton:hover {{ background: {t['BORDER']}; }}
+    QToolButton:checked {{
+        background: {t['ACCENT']}; color: white;
+        border: 1px solid {t['ACCENT']};
     }}
     """
 
@@ -652,6 +665,8 @@ class LegendPanel(QGroupBox):
 class MoleculeCanvas(QSvgWidget):
     rotationChanged = pyqtSignal()
     fileDropped = pyqtSignal(str)
+    moleculeChanged = pyqtSignal() # Emitted when atoms/bonds change
+    requestHistorySave = pyqtSignal() # Emitted BEFORE a change
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -667,6 +682,10 @@ class MoleculeCanvas(QSvgWidget):
         self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
         self.setAcceptDrops(True)
         self._show_vectors = False
+        self.build_mode = False
+        self.build_element = "C"
+        self._bonding_from: int | None = None
+        self._mouse_pos: QPoint | None = None
 
         # Render parameters — all public, set by MainWindow
         self.base_scale     = 110.0
@@ -744,6 +763,12 @@ class MoleculeCanvas(QSvgWidget):
         self._pan  = np.array([0.0, 0.0])
         self.request_render()
 
+    def edit_background_color(self):
+        col = QColorDialog.getColor(QColor(self.background), self, "Background Colour")
+        if col.isValid():
+            self.background = col.name()
+            self.request_render()
+
     def request_render(self, delay_ms: int = 0):
         if not self._render_timer.isActive():
             self._render_timer.start(delay_ms)
@@ -789,10 +814,137 @@ class MoleculeCanvas(QSvgWidget):
         data = self._render_to_bytes()
         if data:
             self.load(QByteArray(data))
+        # Overlay for bonding line
+        if self.build_mode and self._bonding_from is not None and self._mouse_pos is not None:
+            self.update() # Force paintEvent for overlay
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.build_mode and self._bonding_from is not None and self._mouse_pos is not None and self.molecule:
+            # Draw temporary bonding line
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(QColor("#007bff"))
+            # Get start atom projected pos
+            atoms, _ = project_molecule(
+                self.molecule, self._rot, self._pan[0], self._pan[1],
+                self.width(), self.height(), self.base_scale * self._zoom, self.atom_scale
+            )
+            ax, ay, az, ar = atoms[self._bonding_from]
+            p.drawLine(int(ax), int(ay), self._mouse_pos.x(), self._mouse_pos.y())
+            p.end()
 
     # ── mouse ─────────────────────────────────────────────────────────────────
 
+    def _get_hit_atom(self, pos: QPoint) -> int | None:
+        if not self.molecule: return None
+        atoms, _ = project_molecule(
+            self.molecule, self._rot, self._pan[0], self._pan[1],
+            self.width(), self.height(), self.base_scale * self._zoom, self.atom_scale
+        )
+        for i, (ax, ay, az, ar) in enumerate(atoms):
+            dist = math.hypot(pos.x() - ax, pos.y() - ay)
+            if dist < max(ar, 10):
+                return i
+        return None
+
+    def _get_hit_bond(self, pos: QPoint) -> int | None:
+        if not self.molecule: return None
+        _, bonds = project_molecule(
+            self.molecule, self._rot, self._pan[0], self._pan[1],
+            self.width(), self.height(), self.base_scale * self._zoom, self.atom_scale
+        )
+        threshold = 8.0
+        for ax, ay, bx, by, z_avg, idx in bonds:
+            # Distance from point to segment
+            L2 = (bx-ax)**2 + (by-ay)**2
+            if L2 < 1e-6: continue
+            t = max(0, min(1, ((pos.x()-ax)*(bx-ax) + (pos.y()-ay)*(by-ay)) / L2))
+            proj_x = ax + t * (bx-ax)
+            proj_y = ay + t * (by-ay)
+            dist = math.hypot(pos.x() - proj_x, pos.y() - proj_y)
+            if dist < threshold:
+                return idx
+        return None
+
+    def _unproject(self, pos: QPoint) -> np.ndarray:
+        # returns 3D position in molecule local frame (relative to centroid)
+        cx = self.width()/2 + self._pan[0]
+        cy = self.height()/2 + self._pan[1]
+        scale = self.base_scale * self._zoom
+        
+        # Assume z_local = 0
+        rp_x = (pos.x() - cx) / scale
+        rp_y = (cy - pos.y()) / scale
+        rp = np.array([rp_x, rp_y, 0.0])
+        # local = rot^-1 @ rp
+        local = np.linalg.inv(self._rot) @ rp
+        return local
+
     def mousePressEvent(self, event):
+        if self.build_mode and event.button() == Qt.MouseButton.LeftButton:
+            idx = self._get_hit_atom(event.position().toPoint())
+            if idx is not None:
+                self._bonding_from = idx
+                self._mouse_pos = event.position().toPoint()
+                return
+            
+            b_idx = self._get_hit_bond(event.position().toPoint())
+            if b_idx is not None:
+                self.requestHistorySave.emit()
+                self.molecule.bonds[b_idx].order = (self.molecule.bonds[b_idx].order % 3) + 1
+                self.moleculeChanged.emit()
+                self.request_render()
+                return
+
+            # Add new atom if nothing hit
+            if not self.molecule:
+                self.molecule = Molecule("New Molecule", atoms=[])
+            
+            self.requestHistorySave.emit()
+            loc = self._unproject(event.position().toPoint())
+            # Convert local to absolute (if we have a centroid)
+            if self.molecule.atoms:
+                pos_arr = np.array([[a.x, a.y, a.z] for a in self.molecule.atoms])
+                centroid = pos_arr.mean(axis=0)
+                abs_pos = loc + centroid
+            else:
+                abs_pos = loc
+            
+            new_atom = Atom(self.build_element, abs_pos[0], abs_pos[1], abs_pos[2])
+            self.molecule.atoms.append(new_atom)
+            self.moleculeChanged.emit()
+            self.request_render()
+            return
+
+        if self.build_mode and event.button() == Qt.MouseButton.RightButton:
+            idx = self._get_hit_atom(event.position().toPoint())
+            if idx is not None:
+                self.requestHistorySave.emit()
+                # Remove atom
+                self.molecule.atoms.pop(idx)
+                # Remove and re-index bonds
+                new_bonds = []
+                for b in self.molecule.bonds:
+                    if b.i == idx or b.j == idx:
+                        continue
+                    ni = b.i - 1 if b.i > idx else b.i
+                    nj = b.j - 1 if b.j > idx else b.j
+                    new_bonds.append(Bond(ni, nj, b.order))
+                self.molecule.bonds = new_bonds
+                self.moleculeChanged.emit()
+                self.request_render()
+                return
+            
+            b_idx = self._get_hit_bond(event.position().toPoint())
+            if b_idx is not None:
+                self.requestHistorySave.emit()
+                # Remove bond
+                self.molecule.bonds.pop(b_idx)
+                self.moleculeChanged.emit()
+                self.request_render()
+                return
+
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_start = event.position().toPoint()
             self._drag_mode  = "rotate"
@@ -803,6 +955,11 @@ class MoleculeCanvas(QSvgWidget):
             self.setCursor(QCursor(Qt.CursorShape.SizeAllCursor))
 
     def mouseMoveEvent(self, event):
+        self._mouse_pos = event.position().toPoint()
+        if self.build_mode and self._bonding_from is not None:
+            self.request_render(delay_ms=16)
+            return
+
         if self._drag_start is None or self.molecule is None:
             return
         cur = event.position().toPoint()
@@ -826,6 +983,30 @@ class MoleculeCanvas(QSvgWidget):
         self.request_render(delay_ms=16)
 
     def mouseReleaseEvent(self, event):
+        if self.build_mode and self._bonding_from is not None:
+            end_idx = self._get_hit_atom(event.position().toPoint())
+            if end_idx is not None and end_idx != self._bonding_from:
+                self.requestHistorySave.emit()
+                # Bond existing
+                self.molecule.bonds.append(Bond(self._bonding_from, end_idx))
+                self.moleculeChanged.emit()
+            elif end_idx is None:
+                self.requestHistorySave.emit()
+                # Add new atom and bond
+                loc = self._unproject(event.position().toPoint())
+                pos_arr = np.array([[a.x, a.y, a.z] for a in self.molecule.atoms])
+                centroid = pos_arr.mean(axis=0)
+                abs_pos = loc + centroid
+                new_idx = len(self.molecule.atoms)
+                self.molecule.atoms.append(Atom(self.build_element, abs_pos[0], abs_pos[1], abs_pos[2]))
+                self.molecule.bonds.append(Bond(self._bonding_from, new_idx))
+                self.moleculeChanged.emit()
+            
+            self._bonding_from = None
+            self._mouse_pos = None
+            self.request_render()
+            return
+
         self._drag_start = None
         self._drag_mode  = "none"
         self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
@@ -864,9 +1045,21 @@ class MainWindow(QMainWindow):
         self._anim_timer.setInterval(40)  # ~25 FPS
         self._anim_timer.timeout.connect(self._on_anim_step)
         self._anim_phase = 0.0
+        
+        # FF Parameters
+        self._ff_steps = 150
+        self._ff_k_bond = 8.0
+        self._ff_k_rep = 1.5
+
+        # Undo/Redo history
+        self._history = [] # list of deepcopied Molecule
+        self._redo_stack = []
+        self._max_history = 50
+
+        self._build_central()
         self._build_menubar()
         self._build_toolbar()
-        self._build_central()
+        self._setup_builder_toolbar()
         self._build_statusbar()
         self._show_placeholder()
         self.setAcceptDrops(True)
@@ -910,7 +1103,6 @@ class MainWindow(QMainWindow):
 
         # ── Edit ──
         edit_menu = mb.addMenu("&Edit")
-
         act_settings = QAction("&Settings…", self)
         act_settings.setShortcut("Ctrl+P")
         act_settings.triggered.connect(self._edit_settings)
@@ -927,12 +1119,10 @@ class MainWindow(QMainWindow):
 
         # ── View ──
         view_menu = mb.addMenu("&View")
-
         act_reset_view = QAction("&Reset View", self)
         act_reset_view.setShortcut("Ctrl+R")
         act_reset_view.triggered.connect(lambda: self._canvas.reset_view())
         view_menu.addAction(act_reset_view)
-
         view_menu.addSeparator()
 
         presets_menu = view_menu.addMenu("&Preset Orientation")
@@ -950,20 +1140,85 @@ class MainWindow(QMainWindow):
             presets_menu.addAction(a)
 
         view_menu.addSeparator()
-
         act_bg = QAction("&Background Colour…", self)
-        act_bg.triggered.connect(self._pick_background)
+        act_bg.triggered.connect(self._canvas.edit_background_color)
         view_menu.addAction(act_bg)
 
         # ── Calculations ──
         self._menu_calc = mb.addMenu("&Calculations")
         self._menu_calc.setEnabled(False)
 
+        # ── Build ──
+        self._menu_build = mb.addMenu("&Build")
+        
+        act_toggle = QAction("Build Mode", self)
+        act_toggle.setCheckable(True)
+        act_toggle.setShortcut("Ctrl+B")
+        act_toggle.triggered.connect(self._toggle_build_mode)
+        self._menu_build.addAction(act_toggle)
+        self._act_build_toggle = act_toggle # reference for toolbar sync
+
+        self._menu_build.addSeparator()
+        
+        act_clean_m = QAction("Clean Molecule", self)
+        act_clean_m.setShortcut("Ctrl+L")
+        act_clean_m.triggered.connect(self._clean_molecule)
+        self._menu_build.addAction(act_clean_m)
+
+        act_undo = QAction("Undo", self)
+        act_undo.setShortcut("Ctrl+Z")
+        act_undo.triggered.connect(self._undo)
+        self._menu_build.addAction(act_undo)
+
+        act_redo = QAction("Redo", self)
+        act_redo.setShortcuts([QKeySequence("Ctrl+Shift+Z"), QKeySequence("Ctrl+Y")])
+        act_redo.triggered.connect(self._redo)
+        self._menu_build.addAction(act_redo)
+
+        act_ff = QAction("Optimize Settings…", self)
+        act_ff.triggered.connect(self._edit_ff_settings)
+        self._menu_build.addAction(act_ff)
+
+        self._menu_build.addSeparator()
+
+        act_clear_m = QAction("Clear All", self)
+        act_clear_m.triggered.connect(self._clear_molecule)
+        self._menu_build.addAction(act_clear_m)
+
         # ── Help ──
         help_menu = mb.addMenu("&Help")
         act_about = QAction("&About Molvector", self)
         act_about.triggered.connect(self._show_about)
         help_menu.addAction(act_about)
+
+    def _setup_builder_toolbar(self):
+        # ── Build ──
+        self._build_toolbar_obj = QToolBar("Builder")
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._build_toolbar_obj)
+        self._build_toolbar_obj.setVisible(True)
+
+        self._act_build_btn = QAction("Build Mode", self)
+        self._act_build_btn.setCheckable(True)
+        self._act_build_btn.triggered.connect(self._toggle_build_mode)
+        self._build_toolbar_obj.addAction(self._act_build_btn)
+        
+        self._build_toolbar_obj.addSeparator()
+        self._build_toolbar_obj.addWidget(QLabel(" Element: "))
+        self._elem_combo = QComboBox()
+        self._elem_combo.addItems(["H", "C", "N", "O", "F", "P", "S", "Cl", "Br", "I"])
+        self._elem_combo.setCurrentText("C")
+        self._elem_combo.currentTextChanged.connect(self._on_build_elem_change)
+        self._build_toolbar_obj.addWidget(self._elem_combo)
+
+        act_clear = QAction("Clear All", self)
+        act_clear.triggered.connect(self._clear_molecule)
+        self._build_toolbar_obj.addAction(act_clear)
+
+        self._build_toolbar_obj.addSeparator()
+        act_clean = QAction("Clean Molecule", self)
+        act_clean.setToolTip("Rapidly optimize geometry (Force Field)")
+        act_clean.triggered.connect(self._clean_molecule)
+        self._build_toolbar_obj.addAction(act_clean)
 
     # ── toolbar  (only the most frequent actions) ─────────────────────────────
 
@@ -981,10 +1236,10 @@ class MainWindow(QMainWindow):
             tb.addAction(a)
             return a
 
-        tb_action("⊕ Open",      self._open_file, "Ctrl+O", "Open molecule file")
-        tb_action("⊞ Save SVG",  self._save_svg,  "Ctrl+S", "Export current view as SVG")
+        tb_action("Open",      self._open_file, "Ctrl+O", "Open molecule file")
+        tb_action("Save SVG",  self._save_svg,  "Ctrl+S", "Export current view as SVG")
         tb.addSeparator()
-        tb_action("⟳ Reset",     lambda: self._canvas.reset_view(), "Ctrl+R")
+        tb_action("Reset",     lambda: self._canvas.reset_view(), "Ctrl+R")
         tb.addSeparator()
 
         # Zoom readout
@@ -1067,6 +1322,8 @@ class MainWindow(QMainWindow):
         self._canvas = MoleculeCanvas()
         self._canvas.rotationChanged.connect(self._on_rotation_changed)
         self._canvas.fileDropped.connect(self._load_and_display)
+        self._canvas.moleculeChanged.connect(self._on_structure_changed)
+        self._canvas.requestHistorySave.connect(self._save_history)
         root.addWidget(self._canvas, 1)
 
     # ── status bar ────────────────────────────────────────────────────────────
@@ -1476,6 +1733,134 @@ class MainWindow(QMainWindow):
             self._status.showMessage(f"Saved: {path}")
         except Exception as e:
             QMessageBox.critical(self, "Save Error", str(e))
+
+    # ── Builder actions ───────────────────────────────────────────────────────
+
+    def _toggle_build_mode(self, enabled: bool):
+        # Sync menu and toolbar buttons
+        self._act_build_toggle.setChecked(enabled)
+        self._act_build_btn.setChecked(enabled)
+        
+        self._canvas.build_mode = enabled
+        self._status.showMessage("Build Mode Active: Click to add, Drag to bond, Click bond to change order" if enabled else "Build Mode Off")
+        if enabled:
+            self._canvas.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+        else:
+            self._canvas.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+
+    def _on_build_elem_change(self, elem: str):
+        self._canvas.build_element = elem
+
+    def _clear_molecule(self):
+        if QMessageBox.question(self, "Clear", "Clear the entire molecule?") == QMessageBox.StandardButton.Yes:
+            self._save_history()
+            self._canvas.molecule = Molecule("New Molecule", atoms=[])
+            self._canvas.request_render()
+            self._update_info_panel(self._canvas.molecule)
+
+    def _clean_molecule(self):
+        if not self._canvas.molecule or not self._canvas.molecule.atoms:
+            return
+        
+        # Apply the simple spring-repulsion force field with user params
+        self._save_history()
+        optimize_geometry(
+            self._canvas.molecule, 
+            steps=self._ff_steps, 
+            k_bond=self._ff_k_bond, 
+            k_rep=self._ff_k_rep
+        )
+        self._canvas.request_render()
+        self._update_info_panel(self._canvas.molecule)
+        self._status.showMessage(f"Geometry optimized ({self._ff_steps} steps).", 3000)
+
+    def _on_structure_changed(self):
+        # UI updates only; history should be saved BEFORE the change occurs
+        # to capture the 'before' state correctly.
+        self._update_info_panel(self._canvas.molecule)
+
+    def _save_history(self):
+        import copy
+        if self._canvas.molecule:
+            # We save a snapshot of the CURRENT state before it gets modified.
+            snap = copy.deepcopy(self._canvas.molecule)
+            self._history.append(snap)
+            if len(self._history) > self._max_history:
+                self._history.pop(0)
+            # Clear redo stack on NEW action
+            self._redo_stack.clear()
+
+    def _undo(self):
+        if not self._history:
+            self._status.showMessage("Nothing to undo.")
+            return
+        
+        import copy
+        # Save CURRENT state to redo stack before going back
+        if self._canvas.molecule:
+            self._redo_stack.append(copy.deepcopy(self._canvas.molecule))
+
+        # Restore the most recent snapshot
+        prev = self._history.pop()
+        self._canvas.molecule = prev
+        self._canvas.request_render()
+        self._update_info_panel(self._canvas.molecule)
+        self._status.showMessage("Undo successful.")
+
+    def _redo(self):
+        if not self._redo_stack:
+            self._status.showMessage("Nothing to redo.")
+            return
+        
+        import copy
+        # Save CURRENT state to history before going forward
+        if self._canvas.molecule:
+            self._history.append(copy.deepcopy(self._canvas.molecule))
+            if len(self._history) > self._max_history:
+                self._history.pop(0)
+
+        # Restore from redo stack
+        next_state = self._redo_stack.pop()
+        self._canvas.molecule = next_state
+        self._canvas.request_render()
+        self._update_info_panel(self._canvas.molecule)
+        self._status.showMessage("Redo successful.")
+
+    def _edit_ff_settings(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Optimization Parameters")
+        l = QVBoxLayout(dlg)
+        
+        from PyQt6.QtWidgets import QFormLayout, QDoubleSpinBox, QSpinBox, QDialogButtonBox
+        form = QFormLayout()
+        
+        s_steps = QSpinBox()
+        s_steps.setRange(10, 2000)
+        s_steps.setValue(self._ff_steps)
+        form.addRow("Steps:", s_steps)
+        
+        s_kb = QDoubleSpinBox()
+        s_kb.setRange(0.1, 100.0)
+        s_kb.setValue(self._ff_k_bond)
+        form.addRow("Bond Stiffness (k):", s_kb)
+        
+        s_kr = QDoubleSpinBox()
+        s_kr.setRange(0.0, 50.0)
+        s_kr.setValue(self._ff_k_rep)
+        form.addRow("Repulsion (stiffness):", s_kr)
+        
+        l.addLayout(form)
+        
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        l.addWidget(btns)
+        
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._ff_steps = s_steps.value()
+            self._ff_k_bond = s_kb.value()
+            self._ff_k_rep = s_kr.value()
+            self._clean_molecule()
 
     # ── Edit actions ──────────────────────────────────────────────────────────
 

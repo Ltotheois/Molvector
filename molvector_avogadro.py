@@ -584,10 +584,77 @@ def rotation_matrix(rx: float, ry: float, rz: float) -> np.ndarray:
     Ry = np.array([[cy,0,sy],[0,1,0],[-sy,0,cy]])
     Rz = np.array([[cz,-sz,0],[sz,cz,0],[0,0,1]])
     return Rz @ Ry @ Rx
-
 def center_positions(atoms: List[Atom]) -> np.ndarray:
+    if not atoms:
+        return np.zeros((0, 3))
     pos = np.array([a.pos for a in atoms])
     return pos - pos.mean(axis=0)
+
+def optimize_geometry(mol: Molecule, steps: int = 150, k_bond: float = 8.0, k_rep: float = 1.5):
+    """
+    Apply a simple force-directed layout (spring-electric) to 'clean' 
+    the molecular geometry.
+    """
+    if not mol.atoms: return
+    
+    # 1. Prepare positions
+    pos = np.array([a.pos for a in mol.atoms], dtype=np.float64)
+    n = len(pos)
+    if n < 2: return
+    
+    # 2. Calculate ideal bond lengths
+    # Using VDW_RADII as a proxy for covalent radii
+    bond_params = []
+    for b in mol.bonds:
+        r1 = VDW_RADII.get(mol.atoms[b.i].element, 0.8)
+        r2 = VDW_RADII.get(mol.atoms[b.j].element, 0.8)
+        ideal = (r1 + r2) * (0.95 if b.order > 1 else 1.0)
+        if b.order == 3: ideal *= 0.9
+        bond_params.append((b.i, b.j, ideal))
+
+    # 3. Simple Iterative Relaxation (Gradient Descent with Momentum)
+    vel = np.zeros_like(pos)
+    dt = 0.05
+    damping = 0.85
+    
+    for _ in range(steps):
+        forces = np.zeros_like(pos)
+        
+        # Bond Springs
+        for i, j, r0 in bond_params:
+            diff = pos[i] - pos[j]
+            dist = np.linalg.norm(diff)
+            if dist < 1e-4: 
+                # Avoid singularity: push apart randomly
+                forces[i] += np.random.normal(0, 0.1, 3)
+                continue
+            
+            f_mag = -k_bond * (dist - r0)
+            f_vec = (diff / dist) * f_mag
+            forces[i] += f_vec
+            forces[j] -= f_vec
+            
+        # Non-bonded Repulsion (Van der Waals overlaps)
+        for i in range(n):
+            for j in range(i + 1, n):
+                diff = pos[i] - pos[j]
+                dist = np.linalg.norm(diff)
+                if dist < 1e-4: dist = 0.1
+                
+                # We want atoms to be at least r_sum apart
+                r_sum = VDW_RADII.get(mol.atoms[i].element, 0.8) + VDW_RADII.get(mol.atoms[j].element, 0.8)
+                if dist < r_sum * 1.8:
+                    f_mag = k_rep * (r_sum / (dist + 0.1))**4
+                    forces[i] += (diff / dist) * f_mag
+                    forces[j] -= (diff / dist) * f_mag
+
+        # Update
+        vel = (vel + forces * dt) * damping
+        pos += vel * dt
+        
+    # 4. Write back
+    for i, a in enumerate(mol.atoms):
+        a.x, a.y, a.z = pos[i]
 
 def bond_half_line(
     ax:float, ay:float, bx:float, by:float,
@@ -611,6 +678,46 @@ def bond_half_line(
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN RENDERER
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def project_molecule(
+    mol: Molecule,
+    rot: np.ndarray,
+    pan_x: float,
+    pan_y: float,
+    canvas_w: int,
+    canvas_h: int,
+    scale: float,
+    atom_scale: float
+) -> Tuple[List[Tuple[float, float, float, float]], List[Tuple[float, float, float, float, float, int]]]:
+    """
+    Project 3D molecule to 2D canvas coordinates.
+    Returns:
+      atom_projs: list of (px, py, pz, r_px)
+      bond_projs: list of (ax, ay, bx, by, z_avg, bond_idx)
+    """
+    centered = center_positions(mol.atoms)
+    cx = canvas_w/2 + pan_x
+    cy = canvas_h/2 + pan_y
+    CAMERA_Z = 60.0
+    
+    atom_projs = []
+    for i, atom in enumerate(mol.atoms):
+        rp = rot @ centered[i]
+        elem = atom.element
+        vdw  = VDW_RADII.get(elem, DEFAULT_VDW)
+        z_factor = CAMERA_Z / (CAMERA_Z - rp[2]) if (CAMERA_Z - rp[2]) != 0 else 1.0
+        r_px = vdw * scale * atom_scale * z_factor
+        px = cx + rp[0] * scale * z_factor
+        py = cy - rp[1] * scale * z_factor
+        atom_projs.append((px, py, rp[2], r_px))
+        
+    bond_projs = []
+    for i, bond in enumerate(mol.bonds):
+        pA, pB = atom_projs[bond.i], atom_projs[bond.j]
+        bond_projs.append((pA[0], pA[1], pB[0], pB[1], (pA[2] + pB[2])/2, i))
+        
+    return atom_projs, bond_projs
 
 def render_avogadro(
     mol: Molecule,
