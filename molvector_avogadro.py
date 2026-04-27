@@ -14,7 +14,7 @@ Renderer:
   Accepts color_overrides={"C": "#ff0000", ...} for per-element colors.
 """
 
-import math
+import math, random, string
 import numpy as np
 import svgwrite
 from dataclasses import dataclass, field
@@ -90,18 +90,13 @@ ATOMIC_MASSES: Dict[str, float] = {
 # Hill order: C first, H second, then alphabetical
 _HILL_PRIORITY = {"C": 0, "H": 1}
 
-_SUBSCRIPT = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
-
-def _to_subscript(n: int) -> str:
-    return str(n).translate(_SUBSCRIPT)
-
 def chemical_formula(mol: "Molecule") -> str:
-    """Return Hill-order chemical formula with Unicode subscript counts, e.g. C₆₀Ca."""
+    """Return Hill-order chemical formula, e.g. C60Ca."""
     from collections import Counter
     counts = Counter(a.element for a in mol.atoms)
     elems = sorted(counts.keys(),
                    key=lambda e: (_HILL_PRIORITY.get(e, 2), e))
-    formula = "".join(f"{e}{_to_subscript(counts[e]) if counts[e] > 1 else ''}" for e in elems)
+    formula = "".join(f"{e}{counts[e] if counts[e] > 1 else ''}" for e in elems)
     return formula
 
 def molecular_mass(mol: "Molecule") -> float:
@@ -289,37 +284,68 @@ def parse_gaussian_log(text: str) -> Molecule:
     while i < len(lines):
         line = lines[i]
         if line.strip().startswith("Frequencies --"):
-            freqs = [float(f) for f in line.split("--")[1].split()]
+            # Handle cases with -- or ---
+            after_marker = line.split("--", 1)[1].lstrip("-")
+            freqs = [float(f) for f in after_marker.split()]
             n_freqs = len(freqs)
             
             # Find IR intensities if present
             intensities = [0.0] * n_freqs
             j = i + 1
-            while j < i + 10 and j < len(lines):
+            while j < i + 15 and j < len(lines):
                 if "IR Inten    --" in lines[j]:
                     try:
-                        intensities = [float(x) for x in lines[j].split("--")[1].split()]
+                        after_marker_ir = lines[j].split("--", 1)[1].lstrip("-")
+                        intensities = [float(x) for x in after_marker_ir.split()]
                     except ValueError:
                         pass
                     break
                 j += 1
 
             # Find the start of the displacement table
-            while i < len(lines) and "  Atom  AN      X      Y      Z" not in lines[i]:
+            has_coord_atom = False
+            while i < len(lines):
+                if "  Atom  AN      X      Y      Z" in lines[i]:
+                    has_coord_atom = False
+                    break
+                if " Coord Atom Element:" in lines[i]:
+                    has_coord_atom = True
+                    break
                 i += 1
             i += 1 # skip header
             
             disps = [[] for _ in range(n_freqs)]
-            for _ in range(len(atoms)):
-                if i >= len(lines): break
-                parts = lines[i].split()
-                # parts[0]=atom#, parts[1]=atomic#, then 3 coords per freq
-                for f_idx in range(n_freqs):
-                    dx = float(parts[2 + f_idx*3])
-                    dy = float(parts[3 + f_idx*3])
-                    dz = float(parts[4 + f_idx*3])
-                    disps[f_idx].append([dx, dy, dz])
-                i += 1
+            if has_coord_atom:
+                # Format: 3 lines per atom (X, then Y, then Z)
+                for _ in range(len(atoms)):
+                    # X line
+                    parts_x = lines[i].split(); i += 1
+                    # Y line
+                    parts_y = lines[i].split(); i += 1
+                    # Z line
+                    parts_z = lines[i].split(); i += 1
+                    
+                    for f_idx in range(n_freqs):
+                        dx = float(parts_x[3 + f_idx])
+                        dy = float(parts_y[3 + f_idx])
+                        dz = float(parts_z[3 + f_idx])
+                        disps[f_idx].append([dx, dy, dz])
+            else:
+                # Standard format: 1 line per atom
+                for _ in range(len(atoms)):
+                    if i >= len(lines): break
+                    parts = lines[i].split()
+                    for f_idx in range(n_freqs):
+                        dx = float(parts[2 + f_idx*3])
+                        dy = float(parts[3 + f_idx*3])
+                        dz = float(parts[4 + f_idx*3])
+                        disps[f_idx].append([dx, dy, dz])
+                    i += 1
+            
+            # Clear existing modes if we found a "fresh" set (index 1 to 3/5)
+            # Gaussian usually restarts numbering for a new frequency block.
+            if vibrational_modes and vibrational_modes[-1].index >= freqs[0]:
+                vibrational_modes = []
             
             for f_idx in range(n_freqs):
                 vibrational_modes.append(VibrationalMode(
@@ -478,6 +504,9 @@ def render_avogadro(
     output_path: str = "molecule.svg",
     export_mode: bool = False,
     vectors: Optional[List[Tuple[int, float, float, float, str]]] = None,
+    active_vectors: Optional[np.ndarray] = None,
+    animation_phase: float = 0.0,
+    animation_amplitude: float = 0.0,
 ) -> str:
 
     rot = rot_matrix_override if rot_matrix_override is not None \
@@ -497,10 +526,14 @@ def render_avogadro(
     CAMERA_Z = 60.0
     
     proj = []
-    for i in range(len(mol.atoms)):
-        pos  = centered[i]
+    for i, atom in enumerate(mol.atoms):
+        pos = centered[i]
+        if animation_amplitude > 0 and active_vectors is not None:
+            # Oscillation: pos + vector * amp * sin(phase)
+            pos = pos + active_vectors[i] * animation_amplitude * math.sin(animation_phase)
+            
         rp   = rot @ pos
-        elem = mol.atoms[i].element
+        elem = atom.element
         vdw  = VDW_RADII.get(elem, DEFAULT_VDW)
         
         z_factor = CAMERA_Z / (CAMERA_Z - rp[2]) if (CAMERA_Z - rp[2]) != 0 else 1.0
@@ -513,13 +546,16 @@ def render_avogadro(
 
     dwg  = svgwrite.Drawing(output_path, size=(canvas_w, canvas_h))
     defs = dwg.defs
+    
+    # Use a random prefix for all IDs to prevent collisions in Inkscape
+    prefix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
     if not export_mode:
         dwg.add(dwg.rect(insert=(0,0), size=(canvas_w,canvas_h), fill=background))
 
     registered: set = set()
 
     def ensure_grad(elem: str) -> str:
-        gid = f"sph_{elem}"
+        gid = f"sph_{elem}_{prefix}"
         if gid in registered:
             return gid
         base = base_colors.get(elem, DEFAULT_BASE)
@@ -550,6 +586,11 @@ def render_avogadro(
         ai,aj = bond.i,bond.j
         A_orig = centered[ai]
         B_orig = centered[aj]
+        
+        if animation_amplitude > 0 and active_vectors is not None:
+            A_orig = A_orig + active_vectors[ai] * animation_amplitude * math.sin(animation_phase)
+            B_orig = B_orig + active_vectors[aj] * animation_amplitude * math.sin(animation_phase)
+
         u_3D = B_orig - A_orig
         
         rp_A_orig = rot @ A_orig
@@ -601,7 +642,7 @@ def render_avogadro(
                 line_pts, (px, py) = bond_half_line(ox,oy,tx,ty, 0.0, 0.0)
                 if line_pts:
                     col = base_colors.get(col_e, DEFAULT_BASE)
-                    b_id = f"b_g_{bi}_{o_idx}_{col_e}_{1 if is_first else 0}"
+                    b_id = f"b_g_{bi}_{o_idx}_{col_e}_{prefix}_{1 if is_first else 0}"
                     z_sort = min(orig_az, orig_bz) - 0.001
                     draw_list.append((z_sort, 0, ("bond_half", line_pts, px, py, indiv_hw_px, b_id, col_e)))
 
@@ -617,6 +658,8 @@ def render_avogadro(
         # Vector format: (atom_idx, dx, dy, dz, color)
         for ai, vx, vy, vz, vcol in vectors:
             A_orig = centered[ai]
+            if animation_amplitude > 0 and active_vectors is not None:
+                A_orig = A_orig + active_vectors[ai] * animation_amplitude * math.sin(animation_phase)
             B_orig = A_orig + np.array([vx, vy, vz])
             
             rpA = rot @ A_orig
@@ -633,6 +676,7 @@ def render_avogadro(
 
     draw_list.sort(key=lambda x:(x[0],x[1]))
 
+    molecule_group = dwg.g(id="molecule")
     for _,__,item in draw_list:
         kind = item[0]
         if kind == "bond_half":
@@ -684,19 +728,19 @@ def render_avogadro(
                 g.add_stop_color(f"{v*100:.1f}%", get_color_from_ratio(ratio), 1.0)
             defs.add(g)
             
-            dwg.add(dwg.line(
+            molecule_group.add(dwg.line(
                 start=pts[0], end=pts[1],
                 stroke=f"url(#{b_id})", stroke_width=indiv_hw * 2,
                 stroke_linecap="round"
             ))
         elif kind == "atom":
             _, ax, ay, ar, gid, base, dark, elem = item
-            dwg.add(dwg.circle(center=(ax,ay),r=ar*1.04,fill=dark,stroke="none"))
-            dwg.add(dwg.circle(center=(ax,ay),r=ar,fill=f"url(#{gid})",stroke="none"))
+            molecule_group.add(dwg.circle(center=(ax,ay),r=ar*1.04,fill=dark,stroke="none"))
+            molecule_group.add(dwg.circle(center=(ax,ay),r=ar,fill=f"url(#{gid})",stroke="none"))
         elif kind == "vector":
             _, x0, y0, x1, y1, col = item
             # Main line
-            dwg.add(dwg.line(start=(x0, y0), end=(x1, y1), stroke=col, stroke_width=2.5, stroke_linecap="round"))
+            molecule_group.add(dwg.line(start=(x0, y0), end=(x1, y1), stroke=col, stroke_width=2.5, stroke_linecap="round"))
             # Arrowhead
             dx, dy = x1-x0, y1-y0
             L = math.hypot(dx, dy)
@@ -707,7 +751,10 @@ def render_avogadro(
                 p1 = (x1, y1)
                 p2 = (x1 - ux*6 + px*3.5, y1 - uy*6 + py*3.5)
                 p3 = (x1 - ux*6 - px*3.5, y1 - uy*6 - py*3.5)
-                dwg.add(dwg.polygon(points=[p1, p2, p3], fill=col))
+                molecule_group.add(dwg.polygon(points=[p1, p2, p3], fill=col))
+    
+    molecule_group['id'] = f"mol_{prefix}"
+    dwg.add(molecule_group)
 
     if not export_mode:
         dwg.add(dwg.text(

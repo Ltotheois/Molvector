@@ -30,8 +30,9 @@ from PyQt6.QtWidgets import (
     QHeaderView, QTabWidget, QComboBox,
 )
 from PyQt6.QtSvgWidgets import QSvgWidget
-from PyQt6.QtCore import Qt, QByteArray, QPoint, pyqtSignal, QTimer, QSize
-from PyQt6.QtGui import QAction, QColor, QPalette, QFont, QCursor, QIcon, QPixmap
+from PyQt6.QtSvg import QSvgRenderer
+from PyQt6.QtCore import Qt, QByteArray, QPoint, pyqtSignal, QTimer, QSize, QRect, QRectF
+from PyQt6.QtGui import QAction, QColor, QPalette, QFont, QCursor, QIcon, QPixmap, QImage, QPainter, QPdfWriter, QPageSize
 
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -48,6 +49,12 @@ from molvector_avogadro import (
     lighten, darken, hex_to_rgb, rgb_to_hex, auto_dark,
     chemical_formula, molecular_mass, VibrationalMode, ExcitedState,
 )
+
+def get_safe_filename(name: str) -> str:
+    """C60+ -> C60p, removes special characters."""
+    s = name.replace("+", "p").replace("-", "m")
+    import re
+    return re.sub(r'[^a-zA-Z0-9_-]', '', s)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -132,6 +139,11 @@ def get_stylesheet(theme_name: str) -> str:
         padding:5px 14px; font-size:12px;
     }}
     QPushButton:hover  {{ background:{t['BORDER']}; border-color:{t['ACCENT']}; }}
+    QToolTip {{
+        background: {t['CARD_BG']}; color: {t['FG']};
+        border: 1px solid {t['ACCENT']}; border-radius: 4px;
+        padding: 4px;
+    }}
     QPushButton:pressed{{ background:{t['ACCENT']}; }}
     QPushButton#accent {{
         background:#1e4080; border-color:{t['ACCENT']}; color:#fff;
@@ -173,14 +185,6 @@ def get_stylesheet(theme_name: str) -> str:
     QTableWidget {{ background: {t['DARK_BG']}; gridline-color: {t['BORDER']}; border: 1px solid {t['BORDER']}; }}
     QHeaderView::section {{ background: {t['CARD_BG']}; color: {t['FG']}; border: 1px solid {t['BORDER']}; }}
     
-    LegendPanel {{
-        background:{t['CARD_BG']};
-        border:1px solid {t['BORDER']};
-        border-radius:8px;
-    }}
-    QLabel#legend_title {{
-        color:{t['ACCENT']}; font-weight:bold; font-size:12px;
-    }}
     QLabel#dim {{
         color:{t['FG_DIM']};
     }}
@@ -404,6 +408,7 @@ class SpectrumDialog(QDialog):
         self._y = np.array(y_data)
         self._meta = metadata
         self._xl, self._yl = x_label, y_label
+        self._default_file = "spectrum.txt"
 
         layout = QVBoxLayout(self)
         
@@ -450,8 +455,11 @@ class SpectrumDialog(QDialog):
         btns.addWidget(close_btn)
         layout.addLayout(btns)
 
+    def set_default_filename(self, name: str):
+        self._default_file = name
+
     def _export(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export Spectrum", "spectrum.txt", "Text files (*.txt)")
+        path, _ = QFileDialog.getSaveFileName(self, "Export Spectrum", self._default_file, "Text files (*.txt)")
         if not path:
             return
         try:
@@ -475,6 +483,8 @@ class CalculationsDialog(QDialog):
     modeSelected = pyqtSignal(object)  # VibrationalMode
     stateSelected = pyqtSignal(object) # ExcitedState
     viewSpectrum = pyqtSignal(str)     # "ir" or "uvvis"
+    animationToggled = pyqtSignal(bool)
+    vectorsToggled = pyqtSignal(bool)
 
     def __init__(self, mol: Molecule, parent=None):
         super().__init__(parent)
@@ -509,6 +519,19 @@ class CalculationsDialog(QDialog):
             btn_ir = QPushButton("View IR Spectrum…")
             btn_ir.clicked.connect(lambda: self.viewSpectrum.emit("ir"))
             fpl.addWidget(btn_ir)
+            
+            # Animation control
+            self._anim_check = QCheckBox("Show animation")
+            self._anim_check.setObjectName("dim")
+            self._anim_check.toggled.connect(self.animationToggled.emit)
+            fpl.addWidget(self._anim_check)
+
+            # Vector control
+            self._vector_check = QCheckBox("Show displacement vectors")
+            self._vector_check.setChecked(False)
+            self._vector_check.setObjectName("dim")
+            self._vector_check.toggled.connect(self.vectorsToggled.emit)
+            fpl.addWidget(self._vector_check)
             
             self.tabs.addTab(freq_page, "Frequencies")
 
@@ -562,19 +585,14 @@ class CalculationsDialog(QDialog):
 # CPK LEGEND PANEL  (sidebar)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class LegendPanel(QFrame):
+class LegendPanel(QGroupBox):
     elementColorChanged = pyqtSignal(str, str)  # (element_symbol, hex_color)
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__("Elements", parent)
         self._layout = QVBoxLayout(self)
         self._layout.setSpacing(4)
-        self._layout.setContentsMargins(10,10,10,10)
-
-        title = QLabel("Elements")
-        title.setObjectName("legend_title")
-        self._layout.addWidget(title)
-        self._layout.addSpacing(4)
+        self._layout.setContentsMargins(10,14,10,10)
 
         self._rows: list = []
 
@@ -647,19 +665,25 @@ class MoleculeCanvas(QSvgWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
         self.setAcceptDrops(True)
+        self._show_vectors = False
 
         # Render parameters — all public, set by MainWindow
         self.base_scale     = 110.0
         self.atom_scale     = 0.7
         self.bond_width_px  = 10.0
-        self.background     = "#0a0a12"
+        self.background     = "#ffffff"
         self.color_overrides: dict = {}
+        self.animation_phase: float = 0.0
+        self.animation_amplitude: float = 0.0
 
         self._render_timer = QTimer()
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._do_render)
 
-        self.active_vectors: Optional[List[Tuple[int, float, float, float, str]]] = None
+        self.arrows: Optional[List[Tuple[int, float, float, float, str]]] = None
+        self.active_vectors: Optional[np.ndarray] = None
+        self.animation_phase: float = 0.0
+        self.animation_amplitude: float = 0.0
 
     # ── drag and drop ─────────────────────────────────────────────────────────
 
@@ -747,9 +771,12 @@ class MoleculeCanvas(QSvgWidget):
                 bond_width_px=self.bond_width_px,
                 background=self.background,
                 color_overrides=self.color_overrides or None,
+                active_vectors=self.active_vectors,
+                animation_phase=self.animation_phase,
+                animation_amplitude=self.animation_amplitude,
                 output_path=tmp,
                 export_mode=export_mode,
-                vectors=self.active_vectors,
+                vectors=self.arrows if self._show_vectors else None,
             )
             with open(tmp,"rb") as f:
                 return f.read()
@@ -825,9 +852,17 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Molvector — Molecule Viewer")
         self.resize(1080, 720)
-        self._current_theme = "dark"
-        self._apply_theme("dark")
+        self._current_theme = "light"
+        self._apply_theme("light")
+        self._current_source = "None"
+        self._current_path   = ""
         self._color_overrides: dict = {}   # elem -> hex
+        
+        # Animation timer
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(40)  # ~25 FPS
+        self._anim_timer.timeout.connect(self._on_anim_step)
+        self._anim_phase = 0.0
         self._build_menubar()
         self._build_toolbar()
         self._build_central()
@@ -850,10 +885,15 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        act_save_svg = QAction("Save &SVG…", self)
+        act_save_svg = QAction("Export as &SVG…", self)
         act_save_svg.setShortcut("Ctrl+S")
         act_save_svg.triggered.connect(self._save_svg)
         file_menu.addAction(act_save_svg)
+
+        act_export = QAction("&Export View…", self)
+        act_export.setShortcut("Ctrl+E")
+        act_export.triggered.connect(self._export_view)
+        file_menu.addAction(act_export)
 
         file_menu.addSeparator()
 
@@ -989,7 +1029,7 @@ class MainWindow(QMainWindow):
         self._lbl_src   = QLabel("Source: —")
         self._lbl_src.setObjectName("dim")
         self._lbl_src.setStyleSheet("font-size:10px;")
-        for w in (self._lbl_name, self._lbl_charge, self._lbl_atoms, self._lbl_bonds, self._lbl_mass, self._lbl_src):
+        for w in (self._lbl_name, self._lbl_atoms, self._lbl_bonds, self._lbl_mass, self._lbl_charge, self._lbl_src):
             il.addWidget(w)
         sl.addWidget(info)
 
@@ -1025,10 +1065,12 @@ class MainWindow(QMainWindow):
     # ── placeholder ───────────────────────────────────────────────────────────
 
     def _show_placeholder(self):
+        bg = THEMES[self._current_theme]["CANVAS"]
+        fg = THEMES[self._current_theme]["FG_DIM"]
         svg = (
-            '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="450" viewBox="0 0 600 450">' 
-            '<rect width="600" height="450" fill="#0a0a12"/>' 
-            '<text x="300" y="210" text-anchor="middle" font-family="Courier New" font-size="15" fill="#2a3a55">' 
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="600" height="450" viewBox="0 0 600 450">' 
+            f'<rect width="600" height="450" fill="{bg}"/>' 
+            f'<text x="300" y="210" text-anchor="middle" font-family="Courier New" font-size="15" fill="{fg}">' 
             'Open a molecule file to begin' 
             '</text>' 
             '</svg>'
@@ -1096,7 +1138,9 @@ class MainWindow(QMainWindow):
             self._canvas.base_scale = float(self._scale_slider.value())
             self._canvas.load_molecule(mol)
             self._legend.update_for(mol, {})
-            self._update_info_panel(mol, src, path=path)
+            self._current_source = src
+            self._current_path = path
+            self._update_info_panel(mol)
             self._update_calculations_menu(mol)
         except Exception as e:
             QMessageBox.critical(self, "Error loading file",
@@ -1111,24 +1155,39 @@ class MainWindow(QMainWindow):
         act_results.triggered.connect(self._show_calculations_dialog)
         self._menu_calc.addAction(act_results)
         
-        self._menu_calc.addSeparator()
-        
-        act_gs = QAction("Ground State / Reset", self)
-        act_gs.triggered.connect(self._reset_state)
-        self._menu_calc.addAction(act_gs)
-
         if not mol.vibrational_modes and not mol.excited_states:
             self._menu_calc.setEnabled(False)
 
     def _show_calculations_dialog(self):
         mol = self._canvas.molecule
         if not mol: return
-        dlg = CalculationsDialog(mol, self)
+        dlg = CalculationsDialog(mol, parent=self)
         dlg.modeSelected.connect(self._show_vibration)
         dlg.stateSelected.connect(self._show_excited_state)
         dlg.viewSpectrum.connect(self._on_view_spectrum)
-        dlg.show() # Non-modal to allow rotating while selecting
-        self._calc_dlg = dlg # keep reference
+        dlg.animationToggled.connect(self._on_anim_toggle)
+        dlg.vectorsToggled.connect(self._on_vectors_toggle)
+        dlg.show()
+
+    def _on_anim_toggle(self, enabled: bool):
+        if enabled:
+            self._anim_timer.start()
+        else:
+            self._anim_timer.stop()
+            self._canvas.animation_amplitude = 0.0
+            self._canvas.request_render()
+
+    def _on_vectors_toggle(self, enabled: bool):
+        self._canvas._show_vectors = enabled
+        self._canvas.request_render()
+
+    def _on_anim_step(self):
+        self._anim_phase += 0.25
+        if self._anim_phase > 2*math.pi:
+            self._anim_phase -= 2*math.pi
+        self._canvas.animation_phase = self._anim_phase
+        self._canvas.animation_amplitude = 0.6
+        self._canvas.request_render()
 
     def _on_view_spectrum(self, kind):
         if kind == "ir": self._view_ir_spectrum()
@@ -1140,7 +1199,10 @@ class MainWindow(QMainWindow):
         x = [m.frequency for m in mol.vibrational_modes]
         y = [m.intensity for m in mol.vibrational_modes]
         meta = f"Molecule: {mol.name}\nCalculation: Vibrational Frequencies (IR)"
-        dlg = SpectrumDialog(x, y, "Frequency (cm⁻¹)", "Intensity (km/mol)", "IR Spectrum", meta, self)
+        safe_name = get_safe_filename(mol.name)
+        default_file = f"{safe_name}_ir_spectrum.txt"
+        dlg = SpectrumDialog(x, y, "Frequency (cm-1)", "Intensity (km/mol)", "IR Spectrum", meta, self)
+        dlg.set_default_filename(default_file)
         dlg.exec()
 
     def _view_uvvis_spectrum(self):
@@ -1149,36 +1211,43 @@ class MainWindow(QMainWindow):
         x = [s.wavelength_nm for s in mol.excited_states]
         y = [s.oscillator_strength for s in mol.excited_states]
         meta = f"Molecule: {mol.name}\nCalculation: Excited States (TDDFT)"
+        safe_name = get_safe_filename(mol.name)
+        default_file = f"{safe_name}_uvvis_spectrum.txt"
         dlg = SpectrumDialog(x, y, "Wavelength (nm)", "Oscillator Strength (f)", "UV-Vis Spectrum", meta, self)
+        dlg.set_default_filename(default_file)
         dlg.exec()
 
     def _reset_state(self):
+        self._canvas.arrows = None
         self._canvas.active_vectors = None
         self._canvas.request_render()
         if self._canvas.molecule:
-            # Re-update to clear any (S1) labels
-            self._update_info_panel(self._canvas.molecule, "Reset", "")
+            self._update_info_panel(self._canvas.molecule)
 
     def _show_vibration(self, mode: VibrationalMode):
         # Scale displacements for visibility
+        self._canvas.active_vectors = mode.displacements
         scale = 1.2
-        vectors = []
+        arrows = []
         for i, d in enumerate(mode.displacements):
-            vectors.append((i, d[0]*scale, d[1]*scale, d[2]*scale, "#00ff00"))
+            arrows.append((i, d[0]*scale, d[1]*scale, d[2]*scale, "#00ff00"))
         
-        self._canvas.active_vectors = vectors
+        self._canvas.arrows = arrows
         self._canvas.request_render()
         self._status.showMessage(f"Visualizing mode {mode.index}: {mode.frequency:.1f} cm⁻¹")
 
     def _show_excited_state(self, state: ExcitedState):
-        self._canvas.active_vectors = None 
+        self._canvas.arrows = None
+        self._canvas.active_vectors = None
         self._canvas.request_render()
         
         msg = f"Excited State {state.index}: {state.symmetry} | {state.energy_ev:.3f} eV | f={state.oscillator_strength:.4f}"
         self._status.showMessage(msg)
         
         formula = chemical_formula(self._canvas.molecule)
-        self._lbl_name.setText(f"{formula} (S{state.index})")
+        # Keep name consistent, don't add (S1) here if user wants consistency
+        # Or just use plain text
+        self._lbl_name.setText(formula)
 
     def _on_legend_color_changed(self, elem: str, hex_color: str):
         self._color_overrides[elem] = hex_color
@@ -1204,23 +1273,21 @@ class MainWindow(QMainWindow):
         self.style().unpolish(self)
         self.style().polish(self)
 
-    def _update_info_panel(self, mol, src: str, path: str = ""):
+    def _update_info_panel(self, mol):
         """Populate sidebar labels and status bar for a loaded molecule."""
         formula = chemical_formula(mol)
         mass    = molecular_mass(mol)
         charge  = mol.charge
+        src     = self._current_source
+        path    = self._current_path
 
-        # Build name: formula + charge superscript notation
+        # Build name: plain text C60+ etc.
         if charge == 0:
             display_name = formula
-        elif charge == 1:
-            display_name = f"{formula}⁺"
-        elif charge == -1:
-            display_name = f"{formula}⁻"
-        elif charge > 1:
-            display_name = f"{formula}{charge}⁺"
+        elif charge > 0:
+            display_name = f"{formula}{charge}+" if charge > 1 else f"{formula}+"
         else:
-            display_name = f"{formula}{abs(charge)}⁻"
+            display_name = f"{formula}{abs(charge)}-" if charge < -1 else f"{formula}-"
 
         charge_str = "neutral" if charge == 0 else (f"+{charge}" if charge > 0 else str(charge))
 
@@ -1254,8 +1321,9 @@ class MainWindow(QMainWindow):
         if self._canvas.molecule is None:
             QMessageBox.information(self, "No molecule", "Load a molecule first.")
             return
+        safe_name = get_safe_filename(self._canvas.molecule.name)
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save SVG", "molecule.svg", "SVG files (*.svg)"
+            self, "Save SVG", f"{safe_name}_view.svg", "SVG files (*.svg)"
         )
         if not path:
             return
@@ -1266,6 +1334,81 @@ class MainWindow(QMainWindow):
             self._status.showMessage(f"Saved: {path}")
         except Exception as e:
             QMessageBox.critical(self, "Error saving", str(e))
+
+    def _export_view(self):
+        if self._canvas.molecule is None:
+            QMessageBox.information(self, "No molecule", "Load a molecule first.")
+            return
+
+        safe_name = get_safe_filename(self._canvas.molecule.name)
+        filters = "PDF files (*.pdf);;PNG files (*.png);;JPEG files (*.jpg *.jpeg);;SVG files (*.svg)"
+        path, sel_filter = QFileDialog.getSaveFileName(
+            self, "Export View", f"{safe_name}_view.pdf", filters
+        )
+        if not path:
+            return
+
+        try:
+            # 1. Get SVG data from canvas
+            svg_data = self._canvas.get_svg_bytes(export_mode=True)
+            renderer = QSvgRenderer(QByteArray(svg_data))
+            
+            # 2. Determine size (use high res for raster)
+            # We'll use a 2x or 3x scale for images to make them crisp
+            view_size = renderer.defaultSize()
+            if view_size.isEmpty():
+                view_size = QSize(1200, 900)
+            
+            ext = os.path.splitext(path)[1].lower()
+            
+            if ext == ".pdf":
+                pdf = QPdfWriter(path)
+                pdf.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+                # Center the molecule on the page
+                painter = QPainter(pdf)
+                try:
+                    # Scale molecule to fit page comfortably
+                    target_rect = painter.viewport()
+                    # Maintain aspect ratio
+                    svg_ratio = view_size.width() / view_size.height()
+                    page_ratio = target_rect.width() / target_rect.height()
+                    
+                    if svg_ratio > page_ratio:
+                        w = target_rect.width()
+                        h = int(w / svg_ratio)
+                    else:
+                        h = target_rect.height()
+                        w = int(h * svg_ratio)
+                    
+                    # Center it
+                    x = (target_rect.width() - w) // 2
+                    y = (target_rect.height() - h) // 2
+                    renderer.render(painter, QRectF(float(x), float(y), float(w), float(h)))
+                finally:
+                    painter.end()
+            
+            elif ext in (".png", ".jpg", ".jpeg"):
+                # Scale up for high quality
+                scale_factor = 2.0
+                img_size = view_size * scale_factor
+                img = QImage(img_size, QImage.Format.Format_ARGB32)
+                img.fill(Qt.GlobalColor.transparent if ext == ".png" else Qt.GlobalColor.white)
+                
+                painter = QPainter(img)
+                try:
+                    renderer.render(painter)
+                finally:
+                    painter.end()
+                
+                img.save(path)
+            
+            elif ext == ".svg":
+                with open(path, "wb") as f:
+                    f.write(svg_data)
+            
+            self._status.showMessage(f"Exported: {path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", str(e))
 
     # ── Edit actions ──────────────────────────────────────────────────────────
 
