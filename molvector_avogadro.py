@@ -7,11 +7,16 @@ Parsers:
   parse_xyz(text, name)       — standard XYZ format
   parse_gaussian(text)        — Gaussian .gjf / .com input
   parse_gaussian_log(text)    — Gaussian .log / .out output (last geometry)
+  parse_pdb(text)             — standard PDB format
   infer_bonds(mol)            — distance-threshold bond detection
 
 Renderer:
   render_avogadro(mol, ...)   — produces an SVG file
-  Accepts color_overrides={"C": "#ff0000", ...} for per-element colors.
+
+Writers:
+  save_xyz(mol)               — returns XYZ string
+  save_gaussian_input(mol)    — returns GJF string
+  save_pdb(mol)               — returns PDB string
 """
 
 import math, random, string
@@ -132,6 +137,85 @@ def parse_xyz(text: str, name: str = "molecule") -> Molecule:
     
     mol = Molecule(name=name, atoms=atoms, charge=charge)
     mol.name = chemical_formula(mol)
+    return mol
+
+
+def parse_pdb(text: str, name: str = "PDB Molecule") -> Molecule:
+    """Basic PDB parser for ATOM/HETATM and CONECT records."""
+    lines = text.splitlines()
+    atoms = []
+    bonds = []
+    serial_to_idx = {}
+    import re
+    
+    for line in lines:
+        if line.startswith(("ATOM  ", "HETATM")):
+            try:
+                # Fixed-width column parsing
+                serial_str = line[6:11].strip()
+                if not serial_str: continue
+                serial = int(serial_str)
+                
+                atom_name = line[12:16].strip()
+                x_str = line[30:38].strip()
+                y_str = line[38:46].strip()
+                z_str = line[46:54].strip()
+                x, y, z = float(x_str), float(y_str), float(z_str)
+                
+                # Element symbol at 77-78, or infer from name
+                elem = line[76:78].strip()
+                if not elem:
+                    elem = re.sub(r'[^a-zA-Z]', '', atom_name)
+                    if len(elem) > 1 and elem[1].islower():
+                        elem = elem[:2]
+                    else:
+                        elem = elem[:1]
+                
+                if len(elem) == 1: elem = elem.upper()
+                else: elem = elem.capitalize()
+                
+                serial_to_idx[serial] = len(atoms)
+                atoms.append(Atom(elem, x, y, z))
+            except (ValueError, IndexError):
+                continue
+        
+        elif line.startswith("CONECT"):
+            try:
+                # CONECT serial1 serial2 serial3...
+                # Columns: 7-11, 12-16, 17-21, 22-26, 27-31
+                parts = []
+                for i in range(6, len(line), 5):
+                    s = line[i:i+5].strip()
+                    if s: parts.append(s)
+                
+                if not parts: continue
+                src_serial = int(parts[0])
+                if src_serial not in serial_to_idx: continue
+                src_idx = serial_to_idx[src_serial]
+                
+                for target_str in parts[1:]:
+                    target_serial = int(target_str)
+                    if target_serial not in serial_to_idx: continue
+                    target_idx = serial_to_idx[target_serial]
+                    
+                    if src_idx < target_idx:
+                        bonds.append(Bond(src_idx, target_idx))
+            except (ValueError, IndexError):
+                continue
+
+    if not atoms:
+        raise ValueError("No valid ATOM or HETATM records found in PDB.")
+
+    mol = Molecule(name=name, atoms=atoms, bonds=bonds)
+    # Refine name from HEADER or TITLE
+    for line in lines:
+        if line.startswith("HEADER") and len(line) > 10:
+            mol.name = line[10:50].strip() or name
+            break
+        elif line.startswith("TITLE ") and len(line) > 10:
+            mol.name = line[10:70].strip() or name
+            break
+    
     return mol
 
 
@@ -444,6 +528,48 @@ def interpolate_color(c1: str, c2: str, t: float) -> str:
     r1, g1, b1 = hex_to_rgb(c1)
     r2, g2, b2 = hex_to_rgb(c2)
     return rgb_to_hex(r1 + (r2-r1)*t, g1 + (g2-g1)*t, b1 + (b2-b1)*t)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WRITERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def save_xyz(mol: "Molecule") -> str:
+    """Produce standard XYZ string."""
+    lines = [str(len(mol.atoms)), mol.name]
+    for a in mol.atoms:
+        lines.append(f"{a.element:3s} {a.x:12.6f} {a.y:12.6f} {a.z:12.6f}")
+    return "\n".join(lines)
+
+def save_gaussian_input(mol: "Molecule") -> str:
+    """Produce a basic Gaussian input (.gjf) string."""
+    lines = [
+        "%nprocshared=4",
+        "%mem=4GB",
+        f"# p opt freq b3lyp/6-31g(d)",
+        "",
+        mol.name,
+        "",
+        f"{mol.charge} 1"
+    ]
+    for a in mol.atoms:
+        lines.append(f"{a.element:3s} {a.x:12.6f} {a.y:12.6f} {a.z:12.6f}")
+    lines.append("")  # Gaussian needs trailing blank line
+    return "\n".join(lines)
+
+def save_pdb(mol: "Molecule") -> str:
+    """Produce a basic PDB string."""
+    lines = [f"HEADER    {mol.name[:40]:<40}", f"TITLE     {mol.name}"]
+    for i, a in enumerate(mol.atoms):
+        serial = (i + 1) % 100000
+        line = f"HETATM{serial:5d} {a.element:<3s}  UNL A   1    {a.x:8.3f}{a.y:8.3f}{a.z:8.3f}  1.00  0.00          {a.element:>2s}"
+        lines.append(line)
+    
+    for b in mol.bonds:
+        lines.append(f"CONECT{b.i+1:5d}{b.j+1:5d}")
+        
+    lines.append("END")
+    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

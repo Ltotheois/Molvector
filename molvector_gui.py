@@ -44,10 +44,11 @@ except ImportError:
 # ── renderer / parsers ───────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(__file__))
 from molvector_avogadro import (
-    parse_xyz, parse_gaussian, parse_gaussian_log, infer_bonds,
+    parse_xyz, parse_gaussian, parse_gaussian_log, parse_pdb, infer_bonds,
     render_avogadro, Molecule, CPK_BASE, CPK_DARK, VDW_RADII,
     lighten, darken, hex_to_rgb, rgb_to_hex, auto_dark,
     chemical_formula, molecular_mass, VibrationalMode, ExcitedState,
+    save_xyz, save_gaussian_input, save_pdb,
 )
 
 def get_safe_filename(name: str) -> str:
@@ -883,6 +884,11 @@ class MainWindow(QMainWindow):
         act_open.triggered.connect(self._open_file)
         file_menu.addAction(act_open)
 
+        act_save_as = QAction("Save &As…", self)
+        act_save_as.setShortcut("Ctrl+Shift+S")
+        act_save_as.triggered.connect(self._save_as)
+        file_menu.addAction(act_save_as)
+
         file_menu.addSeparator()
 
         act_save_svg = QAction("Export as &SVG…", self)
@@ -1033,6 +1039,16 @@ class MainWindow(QMainWindow):
             il.addWidget(w)
         sl.addWidget(info)
 
+        # Calculations info
+        self._calc_group = QGroupBox("Calculations")
+        cl = QVBoxLayout(self._calc_group)
+        self._lbl_vib = QLabel("Vibrations: —")
+        self._lbl_td  = QLabel("States: —")
+        for w in (self._lbl_vib, self._lbl_td):
+            cl.addWidget(w)
+        sl.addWidget(self._calc_group)
+        self._calc_group.hide()
+
         # Legend
         self._legend = LegendPanel()
         self._legend.elementColorChanged.connect(self._on_legend_color_changed)
@@ -1117,14 +1133,21 @@ class MainWindow(QMainWindow):
         elif ext in (".log", ".out"):
             mol = parse_gaussian_log(text)
             src = "Gaussian log (last geometry)"
+        elif ext == ".pdb":
+            mol = parse_pdb(text, name=os.path.splitext(base)[0])
+            src = "PDB"
         else:
             # Try XYZ first, then Gaussian input
             try:
                 mol = parse_xyz(text, name=base)
                 src = "XYZ (auto)"
             except Exception:
-                mol = parse_gaussian(text)
-                src = "Gaussian input (auto)"
+                try:
+                    mol = parse_pdb(text, name=base)
+                    src = "PDB (auto)"
+                except Exception:
+                    mol = parse_gaussian(text)
+                    src = "Gaussian input (auto)"
 
         infer_bonds(mol)
         return mol, src
@@ -1298,6 +1321,18 @@ class MainWindow(QMainWindow):
         self._lbl_mass.setText(f"Mass: {mass:.3f} uma")
         self._lbl_src.setText(f"Source: {src}")
 
+        # Update Calculations Group
+        has_vib = bool(mol.vibrational_modes)
+        has_td  = bool(mol.excited_states)
+        if has_vib or has_td:
+            self._calc_group.show()
+            self._lbl_vib.setText(f"Vibrations: {len(mol.vibrational_modes)} modes")
+            self._lbl_vib.setVisible(has_vib)
+            self._lbl_td.setText(f"TD-DFT: {len(mol.excited_states)} states")
+            self._lbl_td.setVisible(has_td)
+        else:
+            self._calc_group.hide()
+
         # Update main window title
         self.setWindowTitle(f"Molvector — {display_name}")
 
@@ -1310,9 +1345,9 @@ class MainWindow(QMainWindow):
     def _open_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Molecule File", "",
-            "All supported (*.xyz *.gjf *.com *.log *.out);;"
+            "All supported (*.xyz *.gjf *.com *.log *.out *.pdb);;"
             "XYZ (*.xyz);;Gaussian input (*.gjf *.com);;"
-            "Gaussian log (*.log *.out);;All files (*)"
+            "Gaussian log (*.log *.out);;PDB (*.pdb);;All files (*)"
         )
         if path:
             self._load_and_display(path)
@@ -1409,6 +1444,38 @@ class MainWindow(QMainWindow):
             self._status.showMessage(f"Exported: {path}")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", str(e))
+
+    def _save_as(self):
+        mol = self._canvas.molecule
+        if not mol:
+            QMessageBox.information(self, "No molecule", "Load a molecule first.")
+            return
+            
+        safe_name = get_safe_filename(mol.name)
+        filters = "XYZ (*.xyz);;PDB (*.pdb);;Gaussian input (*.gjf *.com);;All files (*)"
+        path, sel_filter = QFileDialog.getSaveFileName(
+            self, "Save Molecule As", f"{safe_name}.xyz", filters
+        )
+        if not path:
+            return
+            
+        try:
+            ext = os.path.splitext(path)[1].lower()
+            if ext == ".xyz":
+                text = save_xyz(mol)
+            elif ext == ".pdb":
+                text = save_pdb(mol)
+            elif ext in (".gjf", ".com"):
+                text = save_gaussian_input(mol)
+            else:
+                # Default to XYZ if extension is unknown
+                text = save_xyz(mol)
+                
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            self._status.showMessage(f"Saved: {path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", str(e))
 
     # ── Edit actions ──────────────────────────────────────────────────────────
 
