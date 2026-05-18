@@ -990,6 +990,9 @@ def render_avogadro(
                     col = base_colors.get(col_e, DEFAULT_BASE)
                     b_id = f"b_g_{bi}_{o_idx}_{col_e}_{prefix}_{1 if is_first else 0}"
                     z_sort = min(orig_az, orig_bz) - 0.001
+                    if not is_first:
+                        px = -px
+                        py = -py
                     draw_list.append((z_sort, 0, ("bond_half", line_pts, px, py, indiv_hw_px, b_id, col_e)))
 
     for idx,atom in enumerate(mol.atoms):
@@ -1033,19 +1036,6 @@ def render_avogadro(
             I_max = math.hypot(A, Lz)
             if I_max == 0: I_max = 1e-6
             
-            cx_poly = (pts[0][0] + pts[1][0]) / 2
-            cy_poly = (pts[0][1] + pts[1][1]) / 2
-            
-            x1 = cx_poly + px * indiv_hw
-            y1 = cy_poly + py * indiv_hw
-            x2 = cx_poly - px * indiv_hw
-            y2 = cy_poly - py * indiv_hw
-            
-            g = dwg.linearGradient(
-                id=b_id,
-                start=(x1, y1), end=(x2, y2),
-                gradientUnits="userSpaceOnUse"
-            )
             base = base_colors.get(col_e, DEFAULT_BASE)
             dark = dark_colors.get(col_e, DEFAULT_DARK)
             
@@ -1066,6 +1056,37 @@ def render_avogadro(
                         return interpolate_color(stops[i][1], stops[i+1][1], t_ratio)
                 return dark
 
+            x0, y0 = pts[0]
+            x1, y1 = pts[1]
+            hw = indiv_hw
+
+            dx = x1 - x0
+            dy = y1 - y0
+            length = math.hypot(dx, dy)
+            if length > 0:
+                ux = dx / length
+                uy = dy / length
+                x0_r = x0 - ux * hw
+                y0_r = y0 - uy * hw
+                x1_r = x1 + ux * hw
+                y1_r = y1 + uy * hw
+            else:
+                x0_r, y0_r = x0, y0
+                x1_r, y1_r = x1, y1
+
+            rw = math.hypot(x1_r - x0_r, y1_r - y0_r)
+            if rw < 0.01:
+                continue
+            rx = (x0_r + x1_r) / 2
+            ry = (y0_r + y1_r) / 2
+            angle = math.degrees(math.atan2(-px, py))
+
+            g = dwg.linearGradient(
+                id=b_id,
+                start=(0.5, 1), end=(0.5, 0),
+                gradientUnits="objectBoundingBox"
+            )
+
             for i in range(11):
                 v = i / 10.0
                 s = 1.0 - 2.0 * v
@@ -1073,11 +1094,14 @@ def render_avogadro(
                 ratio = intensity / I_max
                 g.add_stop_color(f"{v*100:.1f}%", get_color_from_ratio(ratio), 1.0)
             defs.add(g)
-            
-            molecule_group.add(dwg.line(
-                start=pts[0], end=pts[1],
-                stroke=f"url(#{b_id})", stroke_width=indiv_hw * 2,
-                stroke_linecap="round"
+
+            molecule_group.add(dwg.rect(
+                insert=(-rw / 2, -hw),
+                size=(rw, hw * 2),
+                rx=hw, ry=hw,
+                fill=f"url(#{b_id})",
+                stroke="none",
+                transform=f"translate({rx:.1f},{ry:.1f}) rotate({angle:.1f})"
             ))
         elif kind == "atom":
             _, ax, ay, ar, gid, base, dark, elem = item
