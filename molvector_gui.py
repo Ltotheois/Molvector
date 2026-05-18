@@ -37,6 +37,7 @@ from PyQt6.QtGui import QAction, QColor, QPalette, QFont, QCursor, QIcon, QPixma
 
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
     from matplotlib.figure import Figure
     HAS_MPL = True
 except ImportError:
@@ -459,6 +460,9 @@ class SpectrumDialog(QDialog):
             self.fig.tight_layout()
             layout.addWidget(self.canvas)
 
+            self.toolbar = NavigationToolbar2QT(self.canvas, self)
+            layout.addWidget(self.toolbar)
+
         btns = QHBoxLayout()
         btn_export = QPushButton("Export Data (.txt)")
         btn_export.clicked.connect(self._export)
@@ -516,20 +520,20 @@ class CalculationsDialog(QDialog):
             freq_page = QWidget()
             fpl = QVBoxLayout(freq_page)
             
-            table = QTableWidget(len(mol.vibrational_modes), 3)
-            table.setHorizontalHeaderLabels(["Mode", "Freq (cm⁻¹)", "Intensity (km/mol)"])
-            table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-            table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-            table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            self._freq_table = QTableWidget(len(mol.vibrational_modes), 3)
+            self._freq_table.setHorizontalHeaderLabels(["Mode", "Freq (cm⁻¹)", "Intensity (km/mol)"])
+            self._freq_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self._freq_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+            self._freq_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self._freq_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
             
             for i, m in enumerate(mol.vibrational_modes):
-                table.setItem(i, 0, QTableWidgetItem(str(m.index)))
-                table.setItem(i, 1, QTableWidgetItem(f"{m.frequency:.2f}"))
-                table.setItem(i, 2, QTableWidgetItem(f"{m.intensity:.2f}"))
+                self._freq_table.setItem(i, 0, QTableWidgetItem(str(m.index)))
+                self._freq_table.setItem(i, 1, QTableWidgetItem(f"{m.frequency:.2f}"))
+                self._freq_table.setItem(i, 2, QTableWidgetItem(f"{m.intensity:.2f}"))
             
-            table.itemSelectionChanged.connect(lambda t=table: self._on_freq_sel(t))
-            fpl.addWidget(table)
+            self._freq_table.itemSelectionChanged.connect(lambda t=self._freq_table: self._on_freq_sel(t))
+            fpl.addWidget(self._freq_table)
             
             btn_ir = QPushButton("View IR Spectrum…")
             btn_ir.clicked.connect(lambda: self.viewSpectrum.emit("ir"))
@@ -547,6 +551,10 @@ class CalculationsDialog(QDialog):
             self._vector_check.setObjectName("dim")
             self._vector_check.toggled.connect(self.vectorsToggled.emit)
             fpl.addWidget(self._vector_check)
+
+            btn_export_freq = QPushButton("Export Data (.txt)")
+            btn_export_freq.clicked.connect(lambda: self._export_table(self._freq_table, "frequencies"))
+            fpl.addWidget(btn_export_freq)
             
             self.tabs.addTab(freq_page, "Frequencies")
 
@@ -555,25 +563,29 @@ class CalculationsDialog(QDialog):
             td_page = QWidget()
             tpl = QVBoxLayout(td_page)
             
-            table = QTableWidget(len(mol.excited_states), 4)
-            table.setHorizontalHeaderLabels(["State", "Energy (eV)", "Wavelength (nm)", "f"])
-            table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-            table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-            table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            self._state_table = QTableWidget(len(mol.excited_states), 4)
+            self._state_table.setHorizontalHeaderLabels(["State", "Energy (eV)", "Wavelength (nm)", "f"])
+            self._state_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            self._state_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+            self._state_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            self._state_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
             
             for i, s in enumerate(mol.excited_states):
-                table.setItem(i, 0, QTableWidgetItem(f"S{s.index} ({s.symmetry})"))
-                table.setItem(i, 1, QTableWidgetItem(f"{s.energy_ev:.4f}"))
-                table.setItem(i, 2, QTableWidgetItem(f"{s.wavelength_nm:.2f}"))
-                table.setItem(i, 3, QTableWidgetItem(f"{s.oscillator_strength:.4f}"))
+                self._state_table.setItem(i, 0, QTableWidgetItem(f"S{s.index} ({s.symmetry})"))
+                self._state_table.setItem(i, 1, QTableWidgetItem(f"{s.energy_ev:.4f}"))
+                self._state_table.setItem(i, 2, QTableWidgetItem(f"{s.wavelength_nm:.2f}"))
+                self._state_table.setItem(i, 3, QTableWidgetItem(f"{s.oscillator_strength:.4f}"))
             
-            table.itemSelectionChanged.connect(lambda t=table: self._on_state_sel(t))
-            tpl.addWidget(table)
+            self._state_table.itemSelectionChanged.connect(lambda t=self._state_table: self._on_state_sel(t))
+            tpl.addWidget(self._state_table)
             
             btn_uv = QPushButton("View UV-Vis Spectrum…")
             btn_uv.clicked.connect(lambda: self.viewSpectrum.emit("uvvis"))
             tpl.addWidget(btn_uv)
+
+            btn_export_state = QPushButton("Export Data (.txt)")
+            btn_export_state.clicked.connect(lambda: self._export_table(self._state_table, "excited_states"))
+            tpl.addWidget(btn_export_state)
             
             self.tabs.addTab(td_page, "Excited States (TDDFT)")
 
@@ -594,6 +606,28 @@ class CalculationsDialog(QDialog):
         row_text = rows[0].text()
         idx = int(row_text.split()[0][1:]) - 1
         self.stateSelected.emit(self.mol.excited_states[idx])
+
+    def _export_table(self, table, kind):
+        safe = get_safe_filename(self.mol.name)
+        default_file = f"{safe}_{kind}.txt"
+        path, _ = QFileDialog.getSaveFileName(self, "Export Table", default_file, "Text files (*.txt)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(f"# Molecule: {self.mol.name}\n")
+                f.write(f"# Calculation: {kind}\n")
+                headers = [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())]
+                f.write("# " + "\t".join(headers) + "\n")
+                for row in range(table.rowCount()):
+                    vals = []
+                    for col in range(table.columnCount()):
+                        item = table.item(row, col)
+                        vals.append(item.text() if item else "")
+                    f.write("\t".join(vals) + "\n")
+            QMessageBox.information(self, "Export Successful", f"Data saved to {path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not export: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1485,6 +1519,9 @@ class MainWindow(QMainWindow):
         self._lbl_td  = QLabel("States: —")
         for w in (self._lbl_vib, self._lbl_td):
             cl.addWidget(w)
+        self._btn_view_calc = QPushButton("View Results…")
+        self._btn_view_calc.clicked.connect(self._show_calculations_dialog)
+        cl.addWidget(self._btn_view_calc)
         sl.addWidget(self._calc_group)
         self._calc_group.hide()
 
@@ -1665,7 +1702,7 @@ class MainWindow(QMainWindow):
         meta = f"Molecule: {mol.name}\nCalculation: Vibrational Frequencies (IR)"
         safe_name = get_safe_filename(mol.name)
         default_file = f"{safe_name}_ir_spectrum.txt"
-        dlg = SpectrumDialog(x, y, "Frequency (cm-1)", "Intensity (km/mol)", "IR Spectrum", meta, self)
+        dlg = SpectrumDialog(x, y, "Frequency / cm-1", "Intensity (arb. units)", "IR Spectrum", meta, self)
         dlg.set_default_filename(default_file)
         dlg.exec()
 
@@ -1677,7 +1714,7 @@ class MainWindow(QMainWindow):
         meta = f"Molecule: {mol.name}\nCalculation: Excited States (TDDFT)"
         safe_name = get_safe_filename(mol.name)
         default_file = f"{safe_name}_uvvis_spectrum.txt"
-        dlg = SpectrumDialog(x, y, "Wavelength (nm)", "Oscillator Strength (f)", "UV-Vis Spectrum", meta, self)
+        dlg = SpectrumDialog(x, y, "Wavelength / nm", "Oscillator Strength / f", "UV-Vis Spectrum", meta, self)
         dlg.set_default_filename(default_file)
         dlg.exec()
 
@@ -1765,12 +1802,13 @@ class MainWindow(QMainWindow):
         # Update Calculations Group
         has_vib = bool(mol.vibrational_modes)
         has_td  = bool(mol.excited_states)
-        if has_vib or has_td:
+        has_any = has_vib or has_td
+        if has_any:
             self._calc_group.show()
-            self._lbl_vib.setText(f"Vibrations: {len(mol.vibrational_modes)} modes")
             self._lbl_vib.setVisible(has_vib)
-            self._lbl_td.setText(f"TD-DFT: {len(mol.excited_states)} states")
             self._lbl_td.setVisible(has_td)
+            self._lbl_vib.setText(f"Vibrations: {len(mol.vibrational_modes)} modes")
+            self._lbl_td.setText(f"TD-DFT: {len(mol.excited_states)} states")
         else:
             self._calc_group.hide()
 
