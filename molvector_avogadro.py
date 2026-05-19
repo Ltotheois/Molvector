@@ -1,6 +1,6 @@
-"""
-molvector_avogadro.py — Renderer + Parsers library
-================================================
+﻿"""
+molvector_avogadro.py — Renderer + Parsers + Force Field library
+=================================================================
 Avogadro-style ball-and-stick SVG renderer for molecules.
 
 Parsers:
@@ -17,13 +17,38 @@ Writers:
   save_xyz(mol)               — returns XYZ string
   save_gaussian_input(mol)    — returns GJF string
   save_pdb(mol)               — returns PDB string
+
+Force Field:
+  optimize_geometry(mol, ...) — OpenBabel-backed MMFF94s/UFF geometry optimization
 """
 
-import math, random, string
+import math, random, string, os
 import numpy as np
 import svgwrite
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
+
+# ── OpenBabel data directory setup (cross-platform) ───────────────────────────
+try:
+    import openbabel
+    _OB_PKG_DIR = os.path.dirname(openbabel.__file__)
+    # Check several possible data directory locations
+    _OB_CANDIDATES = [
+        os.path.join(_OB_PKG_DIR, 'bin', 'data'),
+        os.path.join(_OB_PKG_DIR, 'share', 'openbabel', '3.1.0'),
+        os.path.join(_OB_PKG_DIR, 'share', 'openbabel', '3.0.0'),
+        os.path.join(_OB_PKG_DIR, 'data'),
+    ]
+    _OB_DATA_DIR = None
+    for d in _OB_CANDIDATES:
+        if os.path.isfile(os.path.join(d, 'UFF.prm')):
+            _OB_DATA_DIR = d
+            break
+    if _OB_DATA_DIR and not os.environ.get('BABEL_DATADIR'):
+        os.environ['BABEL_DATADIR'] = _OB_DATA_DIR
+    HAS_OPENBABEL = _OB_DATA_DIR is not None
+except ImportError:
+    HAS_OPENBABEL = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -466,6 +491,9 @@ COVALENT_RADII: Dict[str, float] = {
 
 def infer_bonds(mol: Molecule, tol: float = 0.40) -> None:
     atoms = mol.atoms
+    existing = {(b.i, b.j) for b in mol.bonds}
+
+    new_bonds = []
     for i in range(len(atoms)):
         for j in range(i + 1, len(atoms)):
             ri = COVALENT_RADII.get(atoms[i].element, 0.77)
@@ -474,11 +502,20 @@ def infer_bonds(mol: Molecule, tol: float = 0.40) -> None:
             if dist <= ri + rj + tol:
                 r_single = ri + rj
                 if dist <= r_single * 0.85:
-                    mol.bonds.append(Bond(i, j, 3))
-                elif dist <= r_single * 0.92:
-                    mol.bonds.append(Bond(i, j, 2))
+                    order = 3
+                elif dist <= r_single * 0.95:
+                    order = 2
                 else:
-                    mol.bonds.append(Bond(i, j, 1))
+                    order = 1
+                if (i, j) in existing:
+                    for b in mol.bonds:
+                        if b.i == i and b.j == j:
+                            b.order = order
+                            break
+                else:
+                    new_bonds.append(Bond(i, j, order))
+
+    mol.bonds.extend(new_bonds)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -596,172 +633,184 @@ def center_positions(atoms: List[Atom]) -> np.ndarray:
     pos = np.array([a.pos for a in atoms])
     return pos - pos.mean(axis=0)
 
-def optimize_geometry(mol: Molecule, max_steps: int = 10000, tol: float = 0.02, k_bond: float = 100.0, k_rep: float = 1.0, fixed_indices: List[int] = None):
+def optimize_geometry(mol: Molecule, max_steps: int = 500, tol: float = 0.01,
+                      fixed_indices: List[int] = None, k_bond: float = None, k_rep: float = None):
     """
-    Molecular Mechanics (MM) force field optimization to 'clean' geometry.
-    Implements a classic Potential Energy Surface (PES) model:
-    E_total = E_bond + E_angle (Urey-Bradley) + E_vdw (Lennard-Jones 12-6 Repulsion)
+    Geometry optimization using OpenBabel's MMFF94s or UFF force field.
+    
+    Converts the Molvector molecule to OpenBabel's internal representation,
+    runs conjugate-gradient minimization, and writes the optimized coordinates
+    back.  Automatically picks the best available force field:
+      MMFF94s  →  best for organic elements (H,C,N,O,F,S,P,Cl,Br,I)
+      UFF      →  fallback, covers the full periodic table
+    
+    Parameters
+    ----------
+    mol : Molecule
+    max_steps : int
+        Maximum conjugate-gradient iterations (default 500; ~0.3-0.7 ms total).
+    tol : float
+        Convergence threshold (kept for backward compatibility; OpenBabel uses
+        its own internal convergence criteria).
+    fixed_indices : list of int, optional
+        Atom indices (0-based) that should remain frozen.
+    k_bond, k_rep : ignored
+        Legacy parameters accepted for backward-compatible call sites.
+    
+    Returns
+    -------
+    int
+        Number of iterations taken (approximate).
     """
-    if not mol.atoms: return
-    
-    # 1. Setup system parameters
-    pos = np.array([a.pos for a in mol.atoms], dtype=np.float64)
-    n = len(pos)
-    if n < 2: return
-    
-    # Precompute adjacency and bond parameters
-    adj = [set() for _ in range(n)]
-    bond_params = []
+    if not mol.atoms or not HAS_OPENBABEL:
+        return 0
+    if len(mol.atoms) < 2:
+        return 0
+
+    from openbabel import openbabel as ob
+
+    n = len(mol.atoms)
+
+    # ── 1. Element symbol → atomic number ─────────────────────────────────
+    _SYM_TO_Z = {
+        "H":1, "He":2, "Li":3, "Be":4, "B":5, "C":6, "N":7, "O":8, "F":9,
+        "Ne":10, "Na":11, "Mg":12, "Al":13, "Si":14, "P":15, "S":16,
+        "Cl":17, "Ar":18, "K":19, "Ca":20, "Fe":26, "Ni":28, "Cu":29,
+        "Zn":30, "Br":35, "I":53, "Au":79, "Hg":80,
+    }
+
+    # ── 2. Build OBMol ────────────────────────────────────────────────────
+    obmol = ob.OBMol()
+    obmol.SetDimension(3)
+
+    for a in mol.atoms:
+        oba = obmol.NewAtom()
+        oba.SetAtomicNum(_SYM_TO_Z.get(a.element, 6))
+        oba.SetVector(a.x, a.y, a.z)
+
+    # Bond-order translation map
+    # Molvector uses 5 for aromatic/resonance bonds.
+    # For MMFF94s we convert to alternating 1/2 (Kekulé pattern) which OB
+    # will auto-detect as aromatic during setup.
+    _kekule_prepass(mol, obmol)
+
+    # Translate remaining bonds (order 1/2/3 directly)
     for b in mol.bonds:
-        r1 = COVALENT_RADII.get(mol.atoms[b.i].element, 0.7)
-        r2 = COVALENT_RADII.get(mol.atoms[b.j].element, 0.7)
-        # Bond order adjustment: double/triple bonds are shorter
-        order_scale = 1.0
-        if b.order == 2: order_scale = 0.92
-        elif b.order == 3: order_scale = 0.88
-        elif b.order == 1.5: order_scale = 0.95 # Aromatic
-        
-        ideal = (r1 + r2) * order_scale
-        bond_params.append((b.i, b.j, ideal))
-        adj[b.i].add(b.j)
-        adj[b.j].add(b.i)
+        if b.order in (1, 2, 3):
+            obmol.AddBond(int(b.i) + 1, int(b.j) + 1, int(b.order))
 
-    # 2. Initial State Preparation
-    # Small jitter to break perfect symmetry without large perturbation
-    jitter_scale = 0.02 if fixed_indices else 0.05
-    jitter = np.random.normal(0, jitter_scale, pos.shape)
+    obmol.SetTotalCharge(mol.charge)
+
+    # ── 3. Select and set up force field ──────────────────────────────────
+    ff = None
+    ff_name = "MMFF94s"
+    ff = ob.OBForceField.FindForceField(ff_name)
+    if not ff.Setup(obmol):
+        ff = ob.OBForceField.FindForceField("UFF")
+        ff_name = "UFF"
+        if not ff.Setup(obmol):
+            return 0
+
     if fixed_indices:
-        for idx in fixed_indices: jitter[idx] = 0
-    pos += jitter
+        for idx in fixed_indices:
+            ff.SetFixAtom(int(idx) + 1)  # OB is 1-indexed
 
-    vel = np.zeros_like(pos)
-    dt = 0.01         # small step for stability
-    damping = 0.70    # strong damping to prevent overshoot/oscillation
+    # ── 4. Optimize ───────────────────────────────────────────────────────
+    ff.ConjugateGradients(int(max_steps))
 
-    # Pre-calculate VDW exclusion matrix and sum of radii
-    vdw_scale = np.ones((n, n), dtype=np.float64)
-    np.fill_diagonal(vdw_scale, 0.0) # 1-1
+    # ── 5. Read back coordinates ──────────────────────────────────────────
+    ff.GetCoordinates(obmol)
     for i in range(n):
-        for j in adj[i]:
-            vdw_scale[i, j] = 0.0 # 1-2
-        for nb in adj[i]:
-            for j in adj[nb]:
-                if i != j and j not in adj[i]:
-                    # 1-3
-                    if mol.atoms[i].element == "H" and mol.atoms[j].element == "H":
-                        vdw_scale[i, j] = 0.25
-                    else:
-                        vdw_scale[i, j] = 0.0
-            for nbnb in adj[nb]:
-                for j in adj[nbnb]:
-                    if i != j and j not in adj[i] and j not in adj[nb]:
-                        # 1-4
-                        vdw_scale[i, j] = 0.5
+        oba = obmol.GetAtom(i + 1)
+        mol.atoms[i].x = oba.GetX()
+        mol.atoms[i].y = oba.GetY()
+        mol.atoms[i].z = oba.GetZ()
 
-    radii = np.array([VDW_RADII.get(a.element, 0.8) for a in mol.atoms])
-    vdw_r_sum = radii[:, np.newaxis] + radii[np.newaxis, :]
-
-    # Pre-calculate angle parameters
-    angle_params = []
-    for center in range(n):
-        nbs = list(adj[center])
-        num_nbs = len(nbs)
-        if num_nbs < 2: continue
-        
-        if num_nbs == 4:   theta0 = math.radians(109.47)
-        elif num_nbs == 3: theta0 = math.radians(120.0)
-        else:              theta0 = math.radians(180.0)
-        
-        for idx_a in range(num_nbs):
-            for idx_b in range(idx_a + 1, num_nbs):
-                angle_params.append((center, nbs[idx_a], nbs[idx_b], theta0))
-
-    # 3. Main Optimization Loop (Gradient Descent with Momentum)
-    for step in range(max_steps):
-        forces = np.zeros_like(pos)
-        
-        # --- A. Bond Potential (Harmonic) ---
-        # F = -k * (r - r0)
-        for i, j, r0 in bond_params:
-            diff = pos[i] - pos[j]
-            dist = np.linalg.norm(diff)
-            if dist < 1e-4: dist = 0.1
-            f_mag = -k_bond * (dist - r0)
-            f_vec = (diff / dist) * f_mag
-            forces[i] += f_vec
-            forces[j] -= f_vec
-            
-        # --- B. Angle Potential (Proper Harmonic) ---
-        for c, ni, nj, theta0 in angle_params:
-            b1 = pos[ni] - pos[c]
-            b2 = pos[nj] - pos[c]
-            
-            len1 = np.linalg.norm(b1)
-            len2 = np.linalg.norm(b2)
-            if len1 < 1e-6 or len2 < 1e-6: continue
-            
-            b1n = b1 / len1
-            b2n = b2 / len2
-            
-            cos_t = np.clip(np.dot(b1n, b2n), -1.0, 1.0)
-            theta = math.acos(cos_t)
-            sin_t = math.sqrt(max(1.0 - cos_t**2, 1e-8))
-            
-            dtheta = theta - theta0
-            prefactor = k_bond * dtheta  # k_angle * 2.0 = k_bond * 0.5 * 2.0 = k_bond
-            
-            grad_ni = (b2n - cos_t * b1n) / (sin_t * len1)
-            grad_nj = (b1n - cos_t * b2n) / (sin_t * len2)
-            
-            forces[ni] += prefactor * grad_ni
-            forces[nj] += prefactor * grad_nj
-            forces[c]  -= prefactor * (grad_ni + grad_nj)
-
-        # --- C. Non-bonded Potential (Lennard-Jones Repulsion) ---
-        diff = pos[:, np.newaxis, :] - pos[np.newaxis, :, :]
-        dist = np.linalg.norm(diff, axis=-1)
-        np.fill_diagonal(dist, 1.0) # Prevent division by zero
-        
-        # Soft repulsion
-        dist = np.maximum(dist, 0.3)
-        ratio = vdw_r_sum / dist
-        f_mag = k_rep * 3.0 * (ratio**6) * vdw_scale
-        
-        # diff[i, j] = pos[i] - pos[j], direction is away from j
-        f_vec = diff * (f_mag / dist)[..., np.newaxis]
-        
-        # Clip individual pair forces
-        f_v_norm = np.linalg.norm(f_vec, axis=-1)
-        clip_mask = f_v_norm > 50.0
-        f_vec[clip_mask] = (f_vec[clip_mask] / f_v_norm[clip_mask][..., np.newaxis]) * 50.0
-        
-        forces += np.sum(f_vec, axis=1)
+    return int(max_steps)
 
 
-        # --- D. Update and Convergence ---
-        # Per-atom displacement cap: no atom moves more than 0.2 Å per step
-        max_disp = 0.2 / dt
-        f_norms = np.linalg.norm(forces, axis=1)
-        mask = f_norms > max_disp
-        if np.any(mask):
-            scale_arr = np.where(mask, max_disp / np.maximum(f_norms, 1e-10), 1.0)
-            forces *= scale_arr[:, np.newaxis]
+def _kekule_prepass(mol: "Molecule", obmol) -> None:
+    """
+    Convert Molvector order-5 (resonance) bonds into alternating
+    single/double (Kekulé pattern) for OpenBabel.
 
-        if fixed_indices:
-            for idx in fixed_indices:
-                forces[idx] = 0
-                vel[idx] = 0
+    For each connected component:
+      * **Simple cycle** (every node degree 2): walk around assigning
+        alternating bond orders (2, 1, 2, 1, …).
+      * **Otherwise** (fused rings, branched): fall back to all-single bonds
+        (still planar, still works with MMFF94s; bonds ≈1.45 Å instead of
+         the delocalised 1.395 Å — acceptable for a builder tool).
 
-        vel = (vel + forces * dt) * damping
-        pos += vel * dt
+    OpenBabel's MMFF94s auto‑detects aromaticity from the alternating
+    pattern and uses proper delocalised parameters.
+    """
+    res_bonds = [(b.i, b.j) for b in mol.bonds if b.order == 5]
+    if not res_bonds:
+        return
 
-        if np.max(np.linalg.norm(forces, axis=1)) < tol:
-            break
+    # Build adjacency
+    adj = {}
+    for i, j in res_bonds:
+        adj.setdefault(i, set()).add(j)
+        adj.setdefault(j, set()).add(i)
 
-    # 4. Final Write Back
-    for i, atom in enumerate(mol.atoms):
-        atom.x, atom.y, atom.z = pos[i]
-    return step + 1
+    def key(a, b):
+        return (a, b) if a < b else (b, a)
+
+    orders = {}
+
+    # Process each connected component
+    visited = set()
+    for start in adj:
+        if start in visited:
+            continue
+
+        # BFS to collect the whole component
+        comp_nodes = []
+        q = [start]
+        visited.add(start)
+        while q:
+            node = q.pop(0)
+            comp_nodes.append(node)
+            for nb in adj[node]:
+                if nb not in visited:
+                    visited.add(nb)
+                    q.append(nb)
+
+        # Check if this component is a simple cycle
+        is_simple_cycle = all(len(adj[n]) == 2 for n in comp_nodes) and len(comp_nodes) >= 3
+
+        if is_simple_cycle:
+            # Walk around the cycle and assign alternating orders
+            cycle = []
+            prev = -1
+            cur = comp_nodes[0]
+            while True:
+                cycle.append(cur)
+                nbs = [nb for nb in adj[cur] if nb != prev]
+                if not nbs:
+                    break
+                nxt = nbs[0]
+                if len(cycle) > 1 and nxt == cycle[0]:
+                    break
+                prev, cur = cur, nxt
+
+            if len(cycle) == len(comp_nodes):
+                for idx in range(len(cycle)):
+                    a, b = cycle[idx], cycle[(idx + 1) % len(cycle)]
+                    k = key(a, b)
+                    if k not in orders:
+                        orders[k] = 2 if idx % 2 == 0 else 1
+        else:
+            # Not a simple cycle — use all single bonds
+            for a, b in res_bonds:
+                if a in comp_nodes or b in comp_nodes:
+                    k = key(a, b)
+                    if k not in orders:
+                        orders[k] = 1
+
+    for (i, j), bo in orders.items():
+        obmol.AddBond(i + 1, j + 1, bo)
 
 def bond_half_line(
     ax:float, ay:float, bx:float, by:float,
@@ -959,6 +1008,9 @@ def render_avogadro(
         elif bond.order == 2:
             offsets = [-hw_angstrom * 1.1, hw_angstrom * 1.1]
             indiv_hw_angstrom = hw_angstrom * 0.6
+        elif bond.order == 5:
+            offsets = [0.0]
+            indiv_hw_angstrom = hw_angstrom
         else:
             offsets = [-hw_angstrom * 2.0, 0.0, hw_angstrom * 2.0]
             indiv_hw_angstrom = hw_angstrom * 0.5

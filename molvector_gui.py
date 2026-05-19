@@ -894,6 +894,28 @@ class PeriodicTableDialog(QDialog):
 # INTERACTIVE CANVAS
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _ideal_directions(n: int, angle_rad: float):
+    """Return n unit vectors in ideal VSEPR-like geometry (tetrahedral, trigonal, bent)."""
+    if n == 4:
+        a = 1.0 / math.sqrt(3.0)
+        return [np.array([a,a,a]), np.array([a,-a,-a]),
+                np.array([-a,a,-a]), np.array([-a,-a,a])]
+    elif n == 3:
+        s3 = math.sqrt(3.0)/2.0
+        return [np.array([1.0,0.0,0.0]), np.array([-0.5,s3,0.0]), np.array([-0.5,-s3,0.0])]
+    elif n == 2:
+        half = angle_rad / 2.0
+        return [np.array([math.sin(half),0.0,math.cos(half)]),
+                np.array([-math.sin(half),0.0,math.cos(half)])]
+    dirs = []
+    for i in range(n):
+        theta = 2.0 * math.pi * i / n
+        phi = math.acos(2.0 * i / n - 1.0)
+        dirs.append(np.array([math.sin(phi)*math.cos(theta),
+                              math.sin(phi)*math.sin(theta), math.cos(phi)]))
+    return dirs
+
+
 class MoleculeCanvas(QSvgWidget):
     rotationChanged = pyqtSignal()
     fileDropped = pyqtSignal(str)
@@ -1135,7 +1157,7 @@ class MoleculeCanvas(QSvgWidget):
                     at1, at2 = self.molecule.atoms[self.molecule.bonds[b_idx].i], self.molecule.atoms[self.molecule.bonds[b_idx].j]
                     self._apply_auto_h(at1)
                     self._apply_auto_h(at2)
-                    optimize_geometry(self.molecule, max_steps=1000, fixed_indices=self._get_non_h_indices())
+                    self._relax_h()
                 
                 self.moleculeChanged.emit()
                 self.request_render()
@@ -1161,7 +1183,7 @@ class MoleculeCanvas(QSvgWidget):
             
             if self.auto_adjust_h:
                 self._apply_auto_h(self.molecule.atoms[new_idx])
-                optimize_geometry(self.molecule, max_steps=1000, fixed_indices=self._get_non_h_indices())
+                self._relax_h()
                 
             self.moleculeChanged.emit()
             self.request_render()
@@ -1210,7 +1232,7 @@ class MoleculeCanvas(QSvgWidget):
                 if self.auto_adjust_h:
                     for nb_atom in neighbors_to_adjust:
                         self._apply_auto_h(nb_atom)
-                    optimize_geometry(self.molecule, max_steps=1000, fixed_indices=self._get_non_h_indices())
+                    self._relax_h()
 
                 self.moleculeChanged.emit()
                 self.request_render()
@@ -1274,7 +1296,7 @@ class MoleculeCanvas(QSvgWidget):
                     at1, at2 = self.molecule.atoms[self._bonding_from], self.molecule.atoms[end_idx]
                     self._apply_auto_h(at1)
                     self._apply_auto_h(at2)
-                    optimize_geometry(self.molecule, max_steps=1000, fixed_indices=self._get_non_h_indices())
+                    self._relax_h()
                 
                 self.moleculeChanged.emit()
             elif end_idx is None:
@@ -1292,7 +1314,7 @@ class MoleculeCanvas(QSvgWidget):
                     at1, at2 = self.molecule.atoms[self._bonding_from], self.molecule.atoms[new_idx]
                     self._apply_auto_h(at1)
                     self._apply_auto_h(at2)
-                    optimize_geometry(self.molecule, max_steps=1000, fixed_indices=self._get_non_h_indices())
+                    self._relax_h()
                     
                 self.moleculeChanged.emit()
             
@@ -1312,8 +1334,10 @@ class MoleculeCanvas(QSvgWidget):
             "P": 3, "S": 2, "Cl": 1, "Br": 1, "I": 1,
             "Si": 4, "B": 3
         }
-        
-        # Find current index of this atom object
+        # Ideal X-H bond lengths per atom
+        bond_lengths = {"H":0.74,"C":1.09,"N":1.01,"O":0.96,"F":0.92,
+                        "P":1.42,"S":1.34,"Cl":1.27,"Br":1.41,"I":1.61,
+                        "Si":1.48,"B":1.19}
         try:
             atom_idx = -1
             for i, a in enumerate(self.molecule.atoms):
@@ -1322,46 +1346,43 @@ class MoleculeCanvas(QSvgWidget):
                     break
             if atom_idx == -1: return
         except Exception: return
-        
+
         v = valencies.get(atom.element, 0)
         if v <= 0: return
-        
-        # 1. Identify current Hydrogens bonded ONLY to this atom
-        h_to_remove = []
-        bonded_to_other = 0
-        
-        # We need to find all neighbors
+
+        # Collect existing neighbor indices and bond orders
         neighbors = []
-        for i, b in enumerate(self.molecule.bonds):
+        neighbor_orders = {}
+        for b in self.molecule.bonds:
             if b.i == atom_idx:
-                neighbors.append((b.j, b.order, i))
+                neighbors.append(b.j)
+                neighbor_orders[b.j] = b.order
             elif b.j == atom_idx:
-                neighbors.append((b.i, b.order, i))
-        
-        current_h_indices = []
-        for nb_idx, order, bond_idx in neighbors:
-            nb_atom = self.molecule.atoms[nb_idx]
-            if nb_atom.element == "H":
-                # Check if this H is bonded to anything else
-                other_bonds = 0
-                for b in self.molecule.bonds:
-                    if (b.i == nb_idx or b.j == nb_idx):
-                        other_bonds += 1
+                neighbors.append(b.i)
+                neighbor_orders[b.i] = b.order
+
+        # Separate current H (only bonded to this atom) from heavy neighbors
+        h_indices = []
+        heavy_indices = []
+        heavy_order_sum = 0
+        for nb_idx in set(neighbors):
+            if self.molecule.atoms[nb_idx].element == "H":
+                other_bonds = sum(1 for b in self.molecule.bonds if b.i == nb_idx or b.j == nb_idx)
                 if other_bonds == 1:
-                    current_h_indices.append((nb_idx, bond_idx))
+                    h_indices.append(nb_idx)
                 else:
-                    bonded_to_other += order
+                    heavy_indices.append(nb_idx)
+                    heavy_order_sum += neighbor_orders.get(nb_idx, 1)
             else:
-                bonded_to_other += order
-        
-        needed = v - bonded_to_other
-        
-        # 2. Adjust
-        if len(current_h_indices) > needed:
-            # Remove excess
-            to_del_atoms = sorted([idx for idx, b_idx in current_h_indices[needed:]], reverse=True)
-            for idx in to_del_atoms:
-                # Remove atom and its bonds
+                heavy_indices.append(nb_idx)
+                heavy_order_sum += neighbor_orders.get(nb_idx, 1)
+
+        needed = max(0, v - heavy_order_sum)
+
+        # Remove excess H atoms
+        if len(h_indices) > needed:
+            to_del = sorted(h_indices[needed:], reverse=True)
+            for idx in to_del:
                 self.molecule.atoms.pop(idx)
                 new_bonds = []
                 for b in self.molecule.bonds:
@@ -1370,51 +1391,94 @@ class MoleculeCanvas(QSvgWidget):
                     nj = b.j - 1 if b.j > idx else b.j
                     new_bonds.append(Bond(ni, nj, b.order))
                 self.molecule.bonds = new_bonds
-                # Update our target atom_idx if it shifted
                 if atom_idx > idx: atom_idx -= 1
-        elif len(current_h_indices) < needed:
-            # 2. Add missing
-            avg_vec = np.zeros(3)
-            b_count = 0
-            for b in self.molecule.bonds:
-                if b.i == atom_idx:
-                    other = self.molecule.atoms[b.j]
-                    avg_vec += np.array([other.x - atom.x, other.y - atom.y, other.z - atom.z])
-                    b_count += 1
-                elif b.j == atom_idx:
-                    other = self.molecule.atoms[b.i]
-                    avg_vec += np.array([other.x - atom.x, other.y - atom.y, other.z - atom.z])
-                    b_count += 1
-            
-            if b_count > 0:
-                norm = np.linalg.norm(avg_vec)
-                if norm > 1e-4:
-                    base_vec = -avg_vec / norm
-                else:
-                    base_vec = np.array([1.0, 0.0, 0.0])
+            return
+
+        if len(h_indices) >= needed:
+            return
+
+        # Need to add (needed - len(h_indices)) H atoms
+        n_add = needed - len(h_indices)
+
+        # Build existing bond direction vectors (from atom to heavy neighbors)
+        atom_pos = np.array([atom.x, atom.y, atom.z])
+        existing_vecs = []
+        for nb_idx in heavy_indices:
+            nb = self.molecule.atoms[nb_idx]
+            d = np.array([nb.x - atom.x, nb.y - atom.y, nb.z - atom.z])
+            nd = np.linalg.norm(d)
+            if nd > 1e-4:
+                existing_vecs.append(d / nd)
             else:
-                base_vec = np.array([1.0, 0.0, 0.0])
+                existing_vecs.append(np.array([1.0, 0.0, 0.0]))
 
-            for _ in range(needed - len(current_h_indices)):
-                h_idx = len(self.molecule.atoms)
-                rand_dir = np.random.randn(3)
-                if np.linalg.norm(rand_dir) > 1e-4:
-                    rand_dir /= np.linalg.norm(rand_dir)
-                else:
-                    rand_dir = np.array([1.0, 0.0, 0.0])
-                
-                if b_count > 0:
-                    # Keep it on the outward hemisphere
-                    if np.dot(rand_dir, base_vec) < 0:
-                        rand_dir = -rand_dir
-                    # Bias it slightly toward the exact outward vector
-                    rand_dir = rand_dir + base_vec * 0.8
-                    rand_dir /= np.linalg.norm(rand_dir)
+        bl = bond_lengths.get(atom.element, 1.09)
+        steric = len(heavy_indices) + needed  # total bonded atoms (including H to add)
+        if atom.element == "C":
+            angle_by_s = {4: 109.47, 3: 120.0, 2: 180.0}
+        elif atom.element == "O":
+            angle_by_s = {4: 109.47, 3: 120.0, 2: 104.5, 1: 180.0}
+        elif atom.element == "N":
+            angle_by_s = {4: 109.47, 3: 120.0, 2: 104.5, 1: 180.0}
+        else:
+            angle_by_s = {4: 109.47, 3: 120.0, 2: 104.5, 1: 180.0}
+        angle_deg = angle_by_s.get(steric, 109.47)
+        angle_rad = math.radians(angle_deg)
 
-                # 1.2 A distance to clear the carbon core
-                off = rand_dir * 1.2
-                self.molecule.atoms.append(Atom("H", atom.x + off[0], atom.y + off[1], atom.z + off[2]))
-                self.molecule.bonds.append(Bond(atom_idx, h_idx))
+        # Generate ideal geometry directions for the full steric number
+        ideal_dirs = _ideal_directions(steric, angle_rad)
+
+        # Match existing bond directions to closest ideal directions
+        used = set()
+        h_dirs = []
+        for vec in existing_vecs:
+            best = -1
+            best_dot = -2
+            for j, d in enumerate(ideal_dirs):
+                if j in used: continue
+                dot = np.dot(vec, d)
+                if dot > best_dot:
+                    best_dot = dot
+                    best = j
+            used.add(best)
+
+        for j in range(len(ideal_dirs)):
+            if j not in used:
+                h_dirs.append(ideal_dirs[j])
+
+        # Add H atoms in the available ideal directions
+        for i in range(min(n_add, len(h_dirs))):
+            h_idx = len(self.molecule.atoms)
+            off = h_dirs[i] * bl
+            self.molecule.atoms.append(Atom("H", atom.x + off[0], atom.y + off[1], atom.z + off[2]))
+            self.molecule.bonds.append(Bond(atom_idx, h_idx))
+        # If more H needed than available ideal slots (edge case), place at uniform offsets
+        for i in range(n_add - min(n_add, len(h_dirs))):
+            h_idx = len(self.molecule.atoms)
+            off = np.array([1.0, 0.0, 0.0])
+            self.molecule.atoms.append(Atom("H", atom.x + off[0], atom.y + off[1], atom.z + off[2]))
+            self.molecule.bonds.append(Bond(atom_idx, h_idx))
+
+    def _relax_h(self):
+        """Geometrically re-place all H atoms (no FF solver needed)."""
+        if not self.molecule:
+            return
+        done = set()
+        for b in self.molecule.bonds:
+            for parent_idx in (b.i, b.j):
+                if parent_idx in done:
+                    continue
+                if self.molecule.atoms[parent_idx].element == "H":
+                    continue
+                has_h = False
+                for b2 in self.molecule.bonds:
+                    other = b2.j if b2.i == parent_idx else (b2.i if b2.j == parent_idx else -1)
+                    if other >= 0 and self.molecule.atoms[other].element == "H":
+                        has_h = True
+                        break
+                if has_h:
+                    done.add(parent_idx)
+                    self._apply_auto_h(self.molecule.atoms[parent_idx])
 
     def _get_non_h_indices(self) -> List[int]:
         if not self.molecule: return []
@@ -1455,10 +1519,8 @@ class MainWindow(QMainWindow):
         self._anim_phase = 0.0
         
         # FF Parameters
-        self._ff_max_steps = 10000
-        self._ff_tol = 0.02
-        self._ff_k_bond = 8.0
-        self._ff_k_rep = 1.5
+        self._ff_max_steps = 500
+        self._ff_tol = 0.01
 
         # Undo/Redo history
         self._history = [] # list of deepcopied Molecule
@@ -2202,18 +2264,15 @@ class MainWindow(QMainWindow):
         if not self._canvas.molecule or not self._canvas.molecule.atoms:
             return
         
-        # Apply the simple spring-repulsion force field with user params
         self._save_history()
         steps_taken = optimize_geometry(
             self._canvas.molecule, 
             max_steps=self._ff_max_steps, 
             tol=self._ff_tol,
-            k_bond=self._ff_k_bond, 
-            k_rep=self._ff_k_rep
         )
         self._canvas.request_render()
         self._update_info_panel(self._canvas.molecule)
-        self._status.showMessage(f"Geometry optimized in {steps_taken} steps (tol {self._ff_tol}).", 3000)
+        self._status.showMessage(f"Geometry optimized ({steps_taken} iterations).", 3000)
 
     def _on_structure_changed(self):
         # UI updates only; history should be saved BEFORE the change occurs
@@ -2272,30 +2331,13 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle("Optimization Parameters")
         l = QVBoxLayout(dlg)
         
-        from PyQt6.QtWidgets import QFormLayout, QDoubleSpinBox, QSpinBox, QDialogButtonBox
+        from PyQt6.QtWidgets import QFormLayout, QSpinBox, QDialogButtonBox
         form = QFormLayout()
         
         s_steps = QSpinBox()
         s_steps.setRange(10, 100000)
         s_steps.setValue(self._ff_max_steps)
         form.addRow("Max Steps:", s_steps)
-        
-        s_tol = QDoubleSpinBox()
-        s_tol.setRange(0.001, 1.0)
-        s_tol.setSingleStep(0.005)
-        s_tol.setDecimals(3)
-        s_tol.setValue(self._ff_tol)
-        form.addRow("Convergence Tol:", s_tol)
-        
-        s_kb = QDoubleSpinBox()
-        s_kb.setRange(0.1, 100.0)
-        s_kb.setValue(self._ff_k_bond)
-        form.addRow("Bond Stiffness (k):", s_kb)
-        
-        s_kr = QDoubleSpinBox()
-        s_kr.setRange(0.0, 50.0)
-        s_kr.setValue(self._ff_k_rep)
-        form.addRow("Repulsion (stiffness):", s_kr)
         
         l.addLayout(form)
         
@@ -2306,9 +2348,6 @@ class MainWindow(QMainWindow):
         
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._ff_max_steps = s_steps.value()
-            self._ff_tol = s_tol.value()
-            self._ff_k_bond = s_kb.value()
-            self._ff_k_rep = s_kr.value()
             self._clean_molecule()
 
     # ── Edit actions ──────────────────────────────────────────────────────────
