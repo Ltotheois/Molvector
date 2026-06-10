@@ -458,9 +458,16 @@ def parse_gaussian_log(text: str) -> Molecule:
                 pass
             break
 
+    # Check if this is a SelectNormalModes output (non-standard freq format)
+    import re
+    has_select_modes = False
+    for line in lines[:200]:
+        if "SelectNormalModes" in line:
+            has_select_modes = True
+            break
+
     # Extract excited states (TDDFT)
     excited_states = []
-    import re
     for line in lines:
         # Excited State   1:  2.002-?Sym    0.1463 eV 8473.13 nm  f=0.0000  <S**2>=0.752
         m = re.search(r"Excited State\s+(\d+):\s+(.+?)\s+([\d.]+) eV\s+([\d.]+) nm\s+f=([\d.]+)", line)
@@ -547,11 +554,103 @@ def parse_gaussian_log(text: str) -> Molecule:
             continue
         i += 1
 
+    # ── SelectNormalModes fallback ──────────────────────────────────────
+    if has_select_modes and not vibrational_modes:
+        try:
+            _parse_select_modes(text, atoms, vibrational_modes)
+        except Exception:
+            pass
+
     mol = Molecule(name=name, atoms=atoms, charge=charge, 
                    excited_states=excited_states, 
                    vibrational_modes=vibrational_modes)
     mol.name = chemical_formula(mol)
     return mol
+
+
+def _parse_select_modes(text: str, atoms: list, vibrational_modes: list):
+    """
+    Parse Gaussian log output produced with ``freq=(SelectNormalModes, SaveNormalModes)``.
+
+    This keyword suppresses the usual ``Frequencies --`` lines and packs mode
+    data into the route section.  Frequencies are recovered from the
+    ``Vibrational temperatures`` (Kelvin) block.
+    """
+    import re
+    import numpy as np
+
+    n_atoms = len(atoms)
+    n_vib = 3 * n_atoms - 6
+
+    # ── 1.  Vibrational temperatures → frequencies (cm⁻¹) ──────────────
+    K_TO_CM1 = 0.695028
+    freqs = []
+    lines = text.splitlines()
+
+    for i, line in enumerate(lines):
+        if "Vibrational temperatures:" not in line:
+            continue
+        vals = []
+        after = line.split(":", 1)[1].strip()
+        if after:
+            vals.extend(float(x) for x in after.split())
+        for j in range(i + 1, min(i + 20, len(lines))):
+            s = lines[j].strip()
+            if not s:
+                break
+            for tok in s.split():
+                try:
+                    vals.append(float(tok))
+                except ValueError:
+                    pass
+            if len(vals) >= n_vib:
+                break
+        freqs = [v * K_TO_CM1 for v in vals[:n_vib]]
+        break
+
+    if not freqs:
+        raise ValueError(
+            "Could not parse frequencies from Vibrational temperatures."
+        )
+
+    # ── 2.  Route section: displacement vectors ────────────────────────
+    disp_data = None
+    start = text.find("NImag=0")
+    if start >= 0:
+        bs = text.find("\\\\", start)
+        if bs >= 0:
+            sep = text.find("\\\\", bs + 2)
+            if sep >= 0:
+                raw = text[bs + 2:sep]
+                flat = re.sub(r"\s+", "", raw)
+                parts = flat.split(",")
+                vals = []
+                for p in parts:
+                    if p:
+                        try:
+                            vals.append(float(p))
+                        except ValueError:
+                            pass
+                if len(vals) == 1485:
+                    disp_data = np.array(vals).reshape(27, 55)[:, :54]
+
+    # ── 3.  Build mode objects ─────────────────────────────────────────
+    zero = np.zeros((n_atoms, 3))
+    n_avail = len(disp_data) if disp_data is not None else 0
+
+    for idx in range(len(freqs)):
+        if idx < n_avail:
+            displacements = disp_data[idx].reshape(n_atoms, 3)
+        else:
+            displacements = zero.copy()
+        vibrational_modes.append(
+            VibrationalMode(
+                index=idx + 1,
+                frequency=freqs[idx],
+                intensity=0.0,
+                displacements=displacements,
+            )
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
