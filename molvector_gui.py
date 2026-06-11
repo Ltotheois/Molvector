@@ -79,7 +79,29 @@ def load_colored_icon(svg_path: str, color: str, size: int = 22) -> QIcon:
     return QIcon(pix)
 
 def load_app_icon():
-    icon_path = os.path.join(os.path.dirname(__file__), "icon.svg")
+    if platform.system() == "Darwin":
+        icon_path = os.path.join(os.path.dirname(__file__), "assets", "molvector_macos.png")
+        if not os.path.isfile(icon_path):
+            return QIcon()
+        source = QPixmap(icon_path)
+        sizes = [16, 32, 48, 64, 128, 256, 512]
+        icon = QIcon()
+        for s in sizes:
+            pix = QPixmap(s, s)
+            pix.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pix)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            scaled = source.scaled(s, s, Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
+            x = (s - scaled.width()) // 2
+            y = (s - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+            painter.end()
+            icon.addPixmap(pix)
+        return icon
+    icon_path = os.path.join(os.path.dirname(__file__), "assets", "icon.svg")
+    if not os.path.isfile(icon_path):
+        icon_path = os.path.join(os.path.dirname(__file__), "icon.svg")
     if not os.path.isfile(icon_path):
         return QIcon()
     sizes = [16, 32, 48, 64, 128, 256]
