@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QMessageBox, QDialog, QDialogButtonBox, QFormLayout,
     QSpinBox, QDoubleSpinBox, QColorDialog, QPushButton, QGridLayout,
     QScrollArea, QToolBar, QMenu, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QTabWidget, QComboBox,
+    QHeaderView, QTabWidget, QComboBox, QPlainTextEdit, QLineEdit,
 )
 from PyQt6.QtSvgWidgets import QSvgWidget
 from PyQt6.QtSvg import QSvgRenderer
@@ -365,7 +365,7 @@ class ColorButton(QPushButton):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SettingsDialog(QDialog):
-    def __init__(self, theme, atom_scale, bond_width, bg_color, bond_style, live_callback=None, parent=None):
+    def __init__(self, theme, bg_color, live_callback=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setFixedWidth(350)
@@ -389,28 +389,6 @@ class SettingsDialog(QDialog):
         self._bg_btn.colorChanged.connect(self._on_change)
         form.addRow("Background:", self._bg_btn)
 
-        # Ball size
-        self._atom_spin = QDoubleSpinBox()
-        self._atom_spin.setRange(0.2, 3.0)
-        self._atom_spin.setSingleStep(0.05)
-        self._atom_spin.setValue(atom_scale)
-        self._atom_spin.valueChanged.connect(self._on_change)
-        form.addRow("Ball Size:", self._atom_spin)
-
-        # Bond Width
-        self._bond_spin = QDoubleSpinBox()
-        self._bond_spin.setRange(1, 30)
-        self._bond_spin.setValue(bond_width)
-        self._bond_spin.valueChanged.connect(self._on_change)
-        form.addRow("Bond Width:", self._bond_spin)
-
-        # Bond Style
-        self._bond_style_combo = QComboBox()
-        self._bond_style_combo.addItems(["Gradient", "Grey"])
-        self._bond_style_combo.setCurrentText(bond_style.capitalize())
-        self._bond_style_combo.currentTextChanged.connect(self._on_change)
-        form.addRow("Bond Style:", self._bond_style_combo)
-
         layout.addLayout(form)
 
         btns = QDialogButtonBox(
@@ -424,22 +402,13 @@ class SettingsDialog(QDialog):
         if self._live_callback:
             self._live_callback(
                 self._theme_combo.currentText().lower(),
-                self._atom_spin.value(),
-                self._bond_spin.value(),
                 self._bg_btn.color(),
-                self._bond_style_combo.currentText().lower(),
             )
 
     @property
     def theme(self) -> str: return self._theme_combo.currentText().lower()
     @property
-    def atom_scale(self) -> float: return self._atom_spin.value()
-    @property
-    def bond_width(self) -> float: return self._bond_spin.value()
-    @property
     def bg_color(self) -> str: return self._bg_btn.color()
-    @property
-    def bond_style(self) -> str: return self._bond_style_combo.currentText().lower()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -735,6 +704,218 @@ class CalculationsDialog(QDialog):
             QMessageBox.information(self, "Export Successful", f"Data saved to {path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not export: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# G16 INPUT GENERATOR DIALOG
+# ─────────────────────────────────────────────────────────────────────────────
+
+class G16InputDialog(QDialog):
+    def __init__(self, mol, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Generate G16 Input")
+        self.setMinimumSize(680, 540)
+        self.setStyleSheet("""
+            QComboBox:disabled, QSpinBox:disabled {
+                background: #e8e8e8;
+                color: #aaa;
+                border: 1px solid #ccc;
+            }
+        """)
+        self.mol = mol
+        self._generating = False
+        self._last_generated = ""
+        self._all_fields = []
+
+        layout = QVBoxLayout(self)
+
+        # ── Route card fields (each with custom override) ──
+        form = QFormLayout()
+        form.setSpacing(6)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        def combo_row(items):
+            row = QHBoxLayout()
+            combo = QComboBox()
+            combo.addItems(items + ["Custom"])
+            row.addWidget(combo)
+            custom = QLineEdit()
+            custom.setPlaceholderText("Enter custom value…")
+            custom.setFixedWidth(180)
+            custom.setVisible(False)
+            row.addWidget(custom)
+            row.addStretch()
+            return combo, custom, row
+
+        self._job_combo, self._job_custom, j_row = combo_row(
+            ["opt", "freq", "opt freq", "sp", "scan"])
+        form.addRow("Job type:", j_row)
+
+        self._method_combo, self._method_custom, m_row = combo_row(
+            ["b3lyp", "wb97xd", "m062x", "mp2", "hf", "ccsd(t)"])
+        form.addRow("Method:", m_row)
+
+        self._basis_combo, self._basis_custom, b_row = combo_row(
+            ["6-31g(d)", "6-311+g(d,p)", "aug-cc-pvdz", "def2svp", "def2tzvp"])
+        form.addRow("Basis set:", b_row)
+
+        # Toggle custom field visibility and reconnect signals
+        for combo, custom in [(self._job_combo, self._job_custom),
+                              (self._method_combo, self._method_custom),
+                              (self._basis_combo, self._basis_custom)]:
+            combo.currentTextChanged.connect(
+                lambda t, c=custom: c.setVisible(t == "Custom"))
+            combo.currentTextChanged.connect(self._on_field_changed)
+            custom.textChanged.connect(self._on_field_changed)
+
+        btn_style = """
+            QSpinBox::up-button, QSpinBox::down-button { width: 24px; }
+            QSpinBox:disabled { background: #e8e8e8; color: #aaa; border: 1px solid #ccc; }
+        """
+
+        chg_layout = QHBoxLayout()
+        self._charge_spin = QSpinBox()
+        self._charge_spin.setRange(-10, 10)
+        self._charge_spin.setValue(mol.charge)
+        self._charge_spin.setMinimumWidth(90)
+        self._charge_spin.setStyleSheet(btn_style)
+        self._charge_spin.valueChanged.connect(self._on_field_changed)
+        chg_layout.addWidget(self._charge_spin)
+        chg_layout.addSpacing(4)
+        chg_layout.addWidget(QLabel("Mult:"))
+        self._mult_spin = QSpinBox()
+        self._mult_spin.setRange(1, 10)
+        self._mult_spin.setValue(1)
+        self._mult_spin.setMinimumWidth(90)
+        self._mult_spin.setStyleSheet(btn_style)
+        self._mult_spin.valueChanged.connect(self._on_field_changed)
+        chg_layout.addWidget(self._mult_spin)
+        chg_layout.addStretch()
+        form.addRow("Charge / Mult:", chg_layout)
+
+        proc_row = QHBoxLayout()
+        self._nproc_spin = QSpinBox()
+        self._nproc_spin.setRange(1, 64)
+        self._nproc_spin.setValue(4)
+        self._nproc_spin.setMinimumWidth(90)
+        self._nproc_spin.setStyleSheet(btn_style)
+        self._nproc_spin.valueChanged.connect(self._on_field_changed)
+        proc_row.addWidget(self._nproc_spin)
+        proc_row.addStretch()
+        form.addRow("Processors:", proc_row)
+
+        mem_row = QHBoxLayout()
+        self._mem_combo = QComboBox()
+        self._mem_combo.addItems(["2GB", "4GB", "8GB", "16GB", "32GB", "64GB"])
+        self._mem_combo.setCurrentText("8GB")
+        self._mem_combo.currentTextChanged.connect(self._on_field_changed)
+        mem_row.addWidget(self._mem_combo)
+        mem_row.addStretch()
+        form.addRow("Memory:", mem_row)
+
+        layout.addLayout(form)
+
+        # ── Preview (editable) ──
+        layout.addWidget(QLabel("Preview (editable):"))
+        self._preview = QPlainTextEdit()
+        self._preview.setMinimumHeight(180)
+        self._preview.setStyleSheet("font-family: 'Courier New', monospace;")
+        self._preview.textChanged.connect(self._on_preview_edited)
+        layout.addWidget(self._preview)
+
+        # ── Buttons ──
+        btn_layout = QHBoxLayout()
+        btn_save = QPushButton("Save…")
+        btn_save.clicked.connect(self._save)
+        btn_layout.addWidget(btn_save)
+        self._btn_sync = QPushButton("Sync from fields")
+        self._btn_sync.clicked.connect(self._sync_from_fields)
+        btn_layout.addWidget(self._btn_sync)
+        btn_layout.addStretch()
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+
+        # Collect all form fields for enable/disable
+        self._all_fields = [
+            self._job_combo, self._method_combo, self._basis_combo,
+            self._charge_spin, self._mult_spin, self._nproc_spin,
+            self._mem_combo,
+        ]
+
+        self._sync_from_fields()
+
+    def _set_fields_enabled(self, enabled: bool):
+        for w in self._all_fields:
+            w.setEnabled(enabled)
+        self._btn_sync.setEnabled(not enabled)
+
+    def _on_preview_edited(self):
+        if self._generating:
+            return
+        if self._preview.toPlainText() == self._last_generated:
+            return
+        self._set_fields_enabled(False)
+
+    def _on_field_changed(self):
+        self._sync_from_fields()
+
+    def _field_val(self, combo, custom) -> str:
+        if combo.currentText() == "Custom":
+            txt = custom.text().strip()
+            return txt if txt else "CUSTOM"
+        return combo.currentText()
+
+    def _build_route(self) -> str:
+        job = self._field_val(self._job_combo, self._job_custom)
+        method = self._field_val(self._method_combo, self._method_custom)
+        basis = self._field_val(self._basis_combo, self._basis_custom)
+        return f"# {job} {method}/{basis}"
+
+    def _build_text(self) -> str:
+        nproc = self._nproc_spin.value()
+        mem = self._mem_combo.currentText()
+        route = self._build_route()
+        charge = self._charge_spin.value()
+        mult = self._mult_spin.value()
+
+        lines = [
+            f"%nprocshared={nproc}",
+            f"%mem={mem}",
+            route,
+            "",
+            self.mol.name,
+            "",
+            f"{charge} {mult}",
+        ]
+        for a in self.mol.atoms:
+            lines.append(f"{a.element:3s} {a.x:12.6f} {a.y:12.6f} {a.z:12.6f}")
+        lines.append("")
+        return "\n".join(lines)
+
+    def _sync_from_fields(self):
+        self._generating = True
+        self._last_generated = self._build_text()
+        self._preview.setPlainText(self._last_generated)
+        self._generating = False
+        self._set_fields_enabled(True)
+        self._btn_sync.setEnabled(False)
+
+    def _save(self):
+        safe = self.mol.name.replace(" ", "_").replace("/", "_") or "input"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Gaussian Input", f"{safe}.gjf",
+            "Gaussian input (*.gjf *.com);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self._build_text())
+            QMessageBox.information(self, "Saved", f"Gaussian input saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not save: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1824,27 +2005,56 @@ class MainWindow(QMainWindow):
 
         # ── Edit ──
         edit_menu = mb.addMenu("&Edit")
-        act_settings = QAction("&Settings…", self)
-        act_settings.setShortcut("Ctrl+P")
-        act_settings.triggered.connect(self._edit_settings)
-        edit_menu.addAction(act_settings)
 
-        act_colors = QAction("&Atom Colours…", self)
-        act_colors.setShortcut("Ctrl+Shift+C")
-        act_colors.triggered.connect(self._edit_atom_colors)
-        edit_menu.addAction(act_colors)
+        # Appearance submenu
+        app_menu = edit_menu.addMenu("&Appearance")
 
-        act_reset_colors = QAction("Reset Colours to &CPK", self)
+        atom_menu = app_menu.addMenu("&Atom Colours")
+        act_edit_colors = QAction("&Edit…", self)
+        act_edit_colors.setShortcut("Ctrl+Shift+C")
+        act_edit_colors.triggered.connect(self._edit_atom_colors)
+        atom_menu.addAction(act_edit_colors)
+        act_reset_colors = QAction("&Reset to Default", self)
         act_reset_colors.triggered.connect(self._reset_colors)
-        edit_menu.addAction(act_reset_colors)
+        atom_menu.addAction(act_reset_colors)
 
-        edit_menu.addSeparator()
-
-        ball_menu = edit_menu.addMenu("&Ball Size")
+        ball_menu = app_menu.addMenu("&Ball Size")
         for label, scale in [("S&mall", 0.5), ("&Medium", 0.7), ("&Large", 1.0)]:
             a = QAction(label, self)
             a.triggered.connect(lambda _, s=scale: self._set_ball_size(s))
             ball_menu.addAction(a)
+
+        bondw_menu = app_menu.addMenu("&Bond Width")
+        for label, w in [("&Thin", 6.0), ("&Medium", 10.0), ("&Thick", 16.0)]:
+            a = QAction(label, self)
+            a.triggered.connect(lambda _, w=w: self._set_bond_width(w))
+            bondw_menu.addAction(a)
+
+        style_menu = app_menu.addMenu("&Bond Style")
+        self._act_bond_gradient = QAction("&Gradient",    self, checkable=True)
+        self._act_bond_grey     = QAction("&Grey",        self, checkable=True)
+        self._act_bond_match    = QAction("&Match Atom",  self, checkable=True)
+        current = self._canvas.bond_style
+        self._act_bond_gradient.setChecked(current == "gradient")
+        self._act_bond_grey    .setChecked(current == "grey")
+        self._act_bond_match   .setChecked(current == "match")
+        bsg = QActionGroup(self)
+        bsg.addAction(self._act_bond_gradient)
+        bsg.addAction(self._act_bond_grey)
+        bsg.addAction(self._act_bond_match)
+        style_menu.addAction(self._act_bond_gradient)
+        style_menu.addAction(self._act_bond_grey)
+        style_menu.addAction(self._act_bond_match)
+        self._act_bond_gradient.triggered.connect(lambda: self._set_bond_style("gradient"))
+        self._act_bond_grey    .triggered.connect(lambda: self._set_bond_style("grey"))
+        self._act_bond_match   .triggered.connect(lambda: self._set_bond_style("match"))
+
+        edit_menu.addSeparator()
+
+        act_settings = QAction("&Settings…", self)
+        act_settings.setShortcut("Ctrl+P")
+        act_settings.triggered.connect(self._edit_settings)
+        edit_menu.addAction(act_settings)
 
         # ── View ──
         view_menu = mb.addMenu("&View")
@@ -1875,7 +2085,10 @@ class MainWindow(QMainWindow):
 
         # ── Calculations ──
         self._menu_calc = mb.addMenu("&Calculations")
-        self._menu_calc.setEnabled(False)
+        act_g16 = QAction("Generate G16 Input…", self)
+        act_g16.triggered.connect(self._generate_g16_input)
+        self._menu_calc.addAction(act_g16)
+        self._menu_calc.setEnabled(True)
 
         # ── Build ──
         self._menu_build = mb.addMenu("&Build")
@@ -2184,16 +2397,24 @@ class MainWindow(QMainWindow):
                                  f"{type(e).__name__}: {e}")
 
     def _update_calculations_menu(self, mol: Molecule):
-        self._menu_calc.clear()
-        self._menu_calc.setEnabled(True)
+        # Remove any actions beyond the first (Generate G16 Input…)
+        while len(self._menu_calc.actions()) > 1:
+            self._menu_calc.removeAction(self._menu_calc.actions()[-1])
 
-        act_results = QAction("Calculation Results…", self)
-        act_results.setShortcut("Ctrl+M")
-        act_results.triggered.connect(self._show_calculations_dialog)
-        self._menu_calc.addAction(act_results)
-        
-        if not mol.vibrational_modes and not mol.excited_states:
-            self._menu_calc.setEnabled(False)
+        if mol and (mol.vibrational_modes or mol.excited_states):
+            self._menu_calc.addSeparator()
+            act_results = QAction("Calculation Results…", self)
+            act_results.setShortcut("Ctrl+M")
+            act_results.triggered.connect(self._show_calculations_dialog)
+            self._menu_calc.addAction(act_results)
+
+    def _generate_g16_input(self):
+        mol = self._canvas.molecule
+        if not mol or not mol.atoms:
+            QMessageBox.information(self, "No molecule", "Load a molecule first.")
+            return
+        dlg = G16InputDialog(mol, parent=self)
+        dlg.exec()
 
     def _show_calculations_dialog(self):
         mol = self._canvas.molecule
@@ -2667,47 +2888,35 @@ class MainWindow(QMainWindow):
         self._canvas.atom_scale = scale
         self._canvas.request_render()
 
+    def _set_bond_width(self, w: float):
+        self._canvas.bond_width_px = w
+        self._canvas.request_render()
+
     # ── Edit actions ──────────────────────────────────────────────────────────
 
     def _edit_settings(self):
-        orig_theme  = self._current_theme
-        orig_scale  = self._canvas.atom_scale
-        orig_width  = self._canvas.bond_width_px
-        orig_bg     = self._canvas.background
-        orig_style  = self._canvas.bond_style
+        orig_theme = self._current_theme
+        orig_bg    = self._canvas.background
 
-        def _live_update(theme, scale, width, bg, style):
+        def _live_update(theme, bg):
             if theme != self._current_theme:
                 self._apply_theme(theme)
-            self._canvas.atom_scale = scale
-            self._canvas.bond_width_px = width
             self._canvas.background = bg
-            self._canvas.bond_style = style
             self._canvas.request_render()
 
         dlg = SettingsDialog(
             orig_theme,
-            orig_scale,
-            orig_width,
             orig_bg,
-            orig_style,
             live_callback=_live_update,
             parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._apply_theme(dlg.theme)
-            self._canvas.atom_scale = dlg.atom_scale
-            self._canvas.bond_width_px = dlg.bond_width
             self._canvas.background = dlg.bg_color
-            self._canvas.bond_style = dlg.bond_style
             self._canvas.request_render()
         else:
-            # Restore
             self._apply_theme(orig_theme)
-            self._canvas.atom_scale = orig_scale
-            self._canvas.bond_width_px = orig_width
             self._canvas.background = orig_bg
-            self._canvas.bond_style = orig_style
             self._canvas.request_render()
 
     def _edit_atom_colors(self):

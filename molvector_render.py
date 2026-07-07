@@ -1238,6 +1238,51 @@ def render_molecule(
             if bond_style == "grey":
                 base = "#999999"
                 dark = "#555555"
+                z_sort = (orig_az + orig_bz) / 2.0
+                pts = ((ax, ay), (bx, by))
+                b_id = f"b_{bi}_{o_idx}_{prefix}"
+                draw_list.append((z_sort, 0, ("bond_half", pts, px, py, indiv_hw_px, b_id, base, dark)))
+            elif bond_style == "match":
+                base_A = base_colors.get(mol.atoms[ai].element, DEFAULT_BASE)
+                base_B = base_colors.get(mol.atoms[aj].element, DEFAULT_BASE)
+                dark_A = dark_colors.get(mol.atoms[ai].element, DEFAULT_DARK)
+                dark_B = dark_colors.get(mol.atoms[aj].element, DEFAULT_DARK)
+                z_sort = (orig_az + orig_bz) / 2.0
+                overlap = 0.04
+                # A-side half (extends slightly past midpoint)
+                tA0, tA1 = 0.0, 0.5 + overlap * 0.5
+                rpA_A = rpA * (1.0 - tA0) + rpB * tA0
+                rpB_A = rpA * (1.0 - tA1) + rpB * tA1
+                zA_A = CAMERA_Z / max(1e-6, CAMERA_Z - rpA_A[2]) if rpA_A[2] < CAMERA_Z else CAMERA_Z / 1e-6
+                zB_A = CAMERA_Z / max(1e-6, CAMERA_Z - rpB_A[2]) if rpB_A[2] < CAMERA_Z else CAMERA_Z / 1e-6
+                sAx = cx + rpA_A[0] * scale * zA_A; sAy = cy - rpA_A[1] * scale * zA_A
+                eAx = cx + rpB_A[0] * scale * zB_A; eAy = cy - rpB_A[1] * scale * zB_A
+                seg_bdx = eAx - sAx; seg_bdy = eAy - sAy
+                seg_len = math.hypot(seg_bdx, seg_bdy)
+                if seg_len >= 0.01:
+                    ux = seg_bdx / seg_len; uy = seg_bdy / seg_len
+                    ppx, ppy = -uy, ux
+                    avg_z = (zA_A + zB_A) * 0.5
+                    hw = max(0.1, min(100.0, indiv_hw_angstrom * scale * avg_z))
+                    if not math.isfinite(hw): hw = 1.0
+                    draw_list.append((z_sort, 0, ("bond_half", ((sAx,sAy),(eAx,eAy)), ppx, ppy, hw, f"b_{bi}_{o_idx}_A_{prefix}", base_A, dark_A)))
+                # B-side half (starts slightly before midpoint)
+                tB0, tB1 = 0.5 - overlap * 0.5, 1.0
+                rpA_B = rpA * (1.0 - tB0) + rpB * tB0
+                rpB_B = rpA * (1.0 - tB1) + rpB * tB1
+                zA_B = CAMERA_Z / max(1e-6, CAMERA_Z - rpA_B[2]) if rpA_B[2] < CAMERA_Z else CAMERA_Z / 1e-6
+                zB_B = CAMERA_Z / max(1e-6, CAMERA_Z - rpB_B[2]) if rpB_B[2] < CAMERA_Z else CAMERA_Z / 1e-6
+                sBx = cx + rpA_B[0] * scale * zA_B; sBy = cy - rpA_B[1] * scale * zA_B
+                eBx = cx + rpB_B[0] * scale * zB_B; eBy = cy - rpB_B[1] * scale * zB_B
+                seg_bdx = eBx - sBx; seg_bdy = eBy - sBy
+                seg_len = math.hypot(seg_bdx, seg_bdy)
+                if seg_len >= 0.01:
+                    ux = seg_bdx / seg_len; uy = seg_bdy / seg_len
+                    ppx, ppy = -uy, ux
+                    avg_z = (zA_B + zB_B) * 0.5
+                    hw = max(0.1, min(100.0, indiv_hw_angstrom * scale * avg_z))
+                    if not math.isfinite(hw): hw = 1.0
+                    draw_list.append((z_sort, 0, ("bond_half", ((sBx,sBy),(eBx,eBy)), ppx, ppy, hw, f"b_{bi}_{o_idx}_B_{prefix}", base_B, dark_B)))
             else:
                 base_A = base_colors.get(mol.atoms[ai].element, DEFAULT_BASE)
                 base_B = base_colors.get(mol.atoms[aj].element, DEFAULT_BASE)
@@ -1245,11 +1290,10 @@ def render_molecule(
                 dark_B = dark_colors.get(mol.atoms[aj].element, DEFAULT_DARK)
                 base = interpolate_color(base_A, base_B, 0.5)
                 dark = interpolate_color(dark_A, dark_B, 0.5)
-
-            z_sort = (orig_az + orig_bz) / 2.0
-            pts = ((ax, ay), (bx, by))
-            b_id = f"b_{bi}_{o_idx}_{prefix}"
-            draw_list.append((z_sort, 0, ("bond_half", pts, px, py, indiv_hw_px, b_id, base, dark)))
+                z_sort = (orig_az + orig_bz) / 2.0
+                pts = ((ax, ay), (bx, by))
+                b_id = f"b_{bi}_{o_idx}_{prefix}"
+                draw_list.append((z_sort, 0, ("bond_half", pts, px, py, indiv_hw_px, b_id, base, dark)))
 
     for idx,atom in enumerate(mol.atoms):
         ax,ay,az,ar = proj[idx]
