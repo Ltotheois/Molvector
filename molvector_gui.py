@@ -80,44 +80,21 @@ def load_colored_icon(svg_path: str, color: str, size: int = 22) -> QIcon:
     painter.end()
     return QIcon(pix)
 
-def load_app_icon():
+def set_icons(app, win):
     if platform.system() == "Darwin":
         icon_path = os.path.join(os.path.dirname(__file__), "assets", "molvector_macos.png")
-        if not os.path.isfile(icon_path):
-            return QIcon()
-        source = QPixmap(icon_path)
-        sizes = [16, 32, 48, 64, 128, 256, 512]
-        icon = QIcon()
-        for s in sizes:
-            pix = QPixmap(s, s)
-            pix.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(pix)
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            scaled = source.scaled(s, s, Qt.AspectRatioMode.KeepAspectRatio,
-                                   Qt.TransformationMode.SmoothTransformation)
-            x = (s - scaled.width()) // 2
-            y = (s - scaled.height()) // 2
-            painter.drawPixmap(x, y, scaled)
-            painter.end()
-            icon.addPixmap(pix)
-        return icon
-    icon_path = os.path.join(os.path.dirname(__file__), "assets", "icons", "icon.svg")
+    else:
+        icon_path = os.path.join(os.path.dirname(__file__), "assets", "icons", "icon.svg")
+    
     if not os.path.isfile(icon_path):
         icon_path = os.path.join(os.path.dirname(__file__), "assets", "icon.svg")
+    
     if not os.path.isfile(icon_path):
-        return QIcon()
-    sizes = [16, 32, 48, 64, 128, 256]
-    icon = QIcon()
-    renderer = QSvgRenderer(icon_path)
-    for s in sizes:
-        pix = QPixmap(s, s)
-        pix.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pix)
-        renderer.render(painter)
-        painter.end()
-        icon.addPixmap(pix)
-    return icon
-
+        return
+    
+    icon = QIcon(icon_path)
+    app.setWindowIcon(icon)
+    win.setWindowIcon(icon)
 
 def get_safe_filename(name: str) -> str:
     """C60+ -> C60p, removes special characters."""
@@ -3531,11 +3508,9 @@ def main():
         except Exception:
             pass
 
-    app_icon = load_app_icon()
-    app.setWindowIcon(app_icon)
 
     win = MainWindow()
-    win.setWindowIcon(app_icon)
+    set_icons(app, win)
     win.show()
 
     # Optional: open file from command line

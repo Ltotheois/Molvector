@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "molvector"
 version = "1.0.0"
 description = "Interactive 3D Molecule Viewer and Builder"
-readme = {text = "Molvector — interactive 3D molecule viewer, builder, and Gaussian input generator.", content-type = "text/markdown"}
+readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = [
@@ -20,7 +20,7 @@ spectra = ["matplotlib"]
 openbabel = ["openbabel"]
 
 [project.urls]
-Homepage = "https://github.com/anomalyco/Molvector"
+Homepage = "https://github.com/CorentinRossi/Molvector"
 
 [project.scripts]
 molvector = "molvector_gui:main"
