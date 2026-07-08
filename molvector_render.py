@@ -1072,6 +1072,8 @@ def render_molecule(
     animation_phase: float = 0.0,
     animation_amplitude: float = 0.0,
     bond_style: str = "gradient",
+    bond_color: str = "#444444",
+    atom_border: bool = True,
 ) -> str:
 
     rot = rot_matrix_override if rot_matrix_override is not None \
@@ -1235,14 +1237,14 @@ def render_molecule(
             px = -uy_bond
             py = ux_bond
 
-            if bond_style == "grey":
-                base = "#999999"
-                dark = "#555555"
+            if bond_style in ("grey", "unicolor"):
+                base = bond_color
+                dark = auto_dark(bond_color)
                 z_sort = (orig_az + orig_bz) / 2.0
                 pts = ((ax, ay), (bx, by))
                 b_id = f"b_{bi}_{o_idx}_{prefix}"
                 draw_list.append((z_sort, 0, ("bond_half", pts, px, py, indiv_hw_px, b_id, base, dark)))
-            elif bond_style == "match":
+            elif bond_style in ("match", "splitted"):
                 base_A = base_colors.get(mol.atoms[ai].element, DEFAULT_BASE)
                 base_B = base_colors.get(mol.atoms[aj].element, DEFAULT_BASE)
                 dark_A = dark_colors.get(mol.atoms[ai].element, DEFAULT_DARK)
@@ -1288,12 +1290,10 @@ def render_molecule(
                 base_B = base_colors.get(mol.atoms[aj].element, DEFAULT_BASE)
                 dark_A = dark_colors.get(mol.atoms[ai].element, DEFAULT_DARK)
                 dark_B = dark_colors.get(mol.atoms[aj].element, DEFAULT_DARK)
-                base = interpolate_color(base_A, base_B, 0.5)
-                dark = interpolate_color(dark_A, dark_B, 0.5)
                 z_sort = (orig_az + orig_bz) / 2.0
                 pts = ((ax, ay), (bx, by))
                 b_id = f"b_{bi}_{o_idx}_{prefix}"
-                draw_list.append((z_sort, 0, ("bond_half", pts, px, py, indiv_hw_px, b_id, base, dark)))
+                draw_list.append((z_sort, 0, ("bond_gradient", pts, px, py, indiv_hw_px, b_id, base_A, dark_A, base_B, dark_B)))
 
     for idx,atom in enumerate(mol.atoms):
         ax,ay,az,ar = proj[idx]
@@ -1401,12 +1401,84 @@ def render_molecule(
                 stroke="none",
                 transform=f"translate({rx:.1f},{ry:.1f}) rotate({angle:.1f})"
             ))
+        elif kind == "bond_gradient":
+            _, pts, px, py, indiv_hw, b_id, base_A, dark_A, base_B, dark_B = item
+
+            def mat_color(base, dark, ratio):
+                d = 1.0 - ratio
+                stops = [(0.00, lighten(base, 0.70)), (0.18, lighten(base, 0.40)), (0.48, lighten(base, 0.15)), (0.78, base), (1.00, dark)]
+                if d <= 0: return stops[0][1]
+                if d >= 1: return stops[-1][1]
+                for i in range(len(stops)-1):
+                    if stops[i][0] <= d <= stops[i+1][0]:
+                        return interpolate_color(stops[i][1], stops[i+1][1], (d - stops[i][0]) / (stops[i+1][0] - stops[i][0]))
+                return dark
+
+            x0, y0 = pts[0]; x1, y1 = pts[1]
+            hw = indiv_hw
+            dx = x1 - x0; dy = y1 - y0
+            length = math.hypot(dx, dy)
+            if length > 0:
+                ux = dx / length; uy = dy / length
+                x0_r = x0 - ux * hw; y0_r = y0 - uy * hw
+                x1_r = x1 + ux * hw; y1_r = y1 + uy * hw
+            else:
+                x0_r, y0_r = x0, y0; x1_r, y1_r = x1, y1
+            rw = math.hypot(x1_r - x0_r, y1_r - y0_r)
+            if rw < 0.01: continue
+            rx = (x0_r + x1_r) / 2; ry = (y0_r + y1_r) / 2
+            angle = math.degrees(math.atan2(-px, py))
+
+            Lx, Ly, Lz = -0.34, -0.44, 0.83
+            A_sh = px * Lx + py * Ly
+            I_max = math.hypot(A_sh, Lz)
+            if I_max == 0: I_max = 1e-6
+
+            # Base layer: gradient along bond axis (A→B at peak brightness)
+            g = dwg.linearGradient(
+                id=b_id, start=(0, 0.5), end=(1, 0.5),
+                gradientUnits="objectBoundingBox"
+            )
+            num_stops = 21
+            for i in range(num_stops):
+                t = i / (num_stops - 1)
+                ca = mat_color(base_A, dark_A, 1.0)
+                cb = mat_color(base_B, dark_B, 1.0)
+                g.add_stop_color(f"{t*100:.1f}%", interpolate_color(ca, cb, t), 1.0)
+            defs.add(g)
+
+            molecule_group.add(dwg.rect(
+                insert=(-rw / 2, -hw), size=(rw, hw * 2),
+                rx=hw, ry=hw, fill=f"url(#{b_id})", stroke="none",
+                transform=f"translate({rx:.1f},{ry:.1f}) rotate({angle:.1f})"
+            ))
+
+            # Overlay: perpendicular 3D shading (darken edges)
+            sh_id = f"{b_id}_sh"
+            sh_g = dwg.linearGradient(
+                id=sh_id, start=(0.5, 1), end=(0.5, 0),
+                gradientUnits="objectBoundingBox"
+            )
+            for i in range(11):
+                v = i / 10.0
+                s = 1.0 - 2.0 * v
+                intensity = max(0.0, s * A_sh + math.sqrt(max(0.0, 1.0 - s**2)) * Lz)
+                ratio = intensity / I_max
+                sh_g.add_stop_color(f"{v*100:.1f}%", "#000000", (1.0 - ratio) * 0.75)
+            defs.add(sh_g)
+
+            molecule_group.add(dwg.rect(
+                insert=(-rw / 2, -hw), size=(rw, hw * 2),
+                rx=hw, ry=hw, fill=f"url(#{sh_id})", stroke="none",
+                transform=f"translate({rx:.1f},{ry:.1f}) rotate({angle:.1f})"
+            ))
         elif kind == "atom":
             _, ax, ay, ar, gid, base, dark, elem, is_sel = item
             if is_sel:
                 molecule_group.add(dwg.circle(center=(ax,ay), r=ar*1.35, fill="none", stroke="#00aaff", stroke_width=2.0, opacity="0.45"))
                 molecule_group.add(dwg.circle(center=(ax,ay), r=ar*1.15, fill="none", stroke="#44ddff", stroke_width=1.2, opacity="0.75"))
-            molecule_group.add(dwg.circle(center=(ax,ay),r=ar*1.04,fill=dark,stroke="none"))
+            if atom_border:
+                molecule_group.add(dwg.circle(center=(ax,ay),r=ar*1.04,fill=dark,stroke="none"))
             molecule_group.add(dwg.circle(center=(ax,ay),r=ar,fill=f"url(#{gid})",stroke="none"))
         elif kind == "vector":
             _, x0, y0, x1, y1, col = item

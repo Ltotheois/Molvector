@@ -347,13 +347,13 @@ class AppearanceDialog(QDialog):
     CONFIG_FILE = os.path.join(os.path.dirname(__file__), "molvector_config.json")
 
     def __init__(self, atom_scale, bond_width, bond_style, color_overrides,
-                 live_callback=None, parent=None):
+                 atom_border=True, bond_color="#444444", live_callback=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Appearance")
         self.setMinimumWidth(400)
         self._live_callback = live_callback
         self._orig = (atom_scale, bond_width, bond_style,
-                      dict(color_overrides))
+                      dict(color_overrides), atom_border, bond_color)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -385,24 +385,38 @@ class AppearanceDialog(QDialog):
         bondw_row.addWidget(self._bondw_lbl)
         form.addRow("Bond Width:", bondw_row)
 
+        # Atom colours + border (init early so _on_change can access them)
+        self._color_overrides = color_overrides
+        self._border_cb = QCheckBox("Show atom border")
+        self._border_cb.setChecked(atom_border)
+
         # Bond style
-        style_group = QButtonGroup(self)
+        self._style_combo = QComboBox()
+        self._style_combo.addItems(["Gradient", "Unicolor", "Splitted"])
+        self._bond_color = bond_color
         style_row = QHBoxLayout()
-        for s in ("gradient", "grey", "splitted"):
-            rb = QRadioButton(s.capitalize())
-            if s == bond_style:
-                rb.setChecked(True)
-            style_group.addButton(rb)
-            style_row.addWidget(rb)
-        self._style_btns = style_group
+        style_row.addWidget(self._style_combo)
+        self._unicolor_btn = QPushButton()
+        self._unicolor_btn.setFixedSize(28, 22)
+        self._unicolor_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._unicolor_btn.clicked.connect(self._pick_unicolor)
+        self._update_unicolor_btn()
+        style_row.addWidget(self._unicolor_btn)
+        self._style_combo.currentTextChanged.connect(self._on_style_change)
+        current = bond_style.capitalize() if bond_style != "grey" else "Unicolor"
+        self._style_combo.setCurrentText(current)
+        self._unicolor_btn.setVisible(current == "Unicolor")
         style_row.addStretch()
         form.addRow("Bond Style:", style_row)
 
-        # Atom colours
-        self._color_overrides = color_overrides
+        # Atom colours button
         self._edit_colors_btn = QPushButton("Edit Atom Colours…")
         self._edit_colors_btn.clicked.connect(self._edit_atom_colors)
         form.addRow("Atom Colours:", self._edit_colors_btn)
+
+        # Atom border
+        self._border_cb.toggled.connect(self._on_change)
+        form.addRow("Atom Border:", self._border_cb)
 
         layout.addLayout(form)
 
@@ -428,8 +442,24 @@ class AppearanceDialog(QDialog):
         if self._live_callback:
             self._live_callback(
                 self.ball_scale, self.bond_width, self.bond_style,
-                self._color_overrides,
+                self._color_overrides, self.atom_border, self.bond_color,
             )
+
+    def _on_style_change(self, text: str):
+        self._unicolor_btn.setVisible(text == "Unicolor")
+        self._on_change()
+
+    def _pick_unicolor(self):
+        col = QColorDialog.getColor(QColor(self._bond_color), self, "Choose Bond Color")
+        if col.isValid():
+            self._bond_color = col.name()
+            self._update_unicolor_btn()
+            self._on_change()
+
+    def _update_unicolor_btn(self):
+        self._unicolor_btn.setStyleSheet(
+            f"background-color: {self._bond_color}; border: 1px solid #888; border-radius: 3px;"
+        )
 
     @property
     def ball_scale(self) -> float:
@@ -440,11 +470,19 @@ class AppearanceDialog(QDialog):
         return float(self._bondw_slider.value())
 
     @property
+    def atom_border(self) -> bool:
+        return self._border_cb.isChecked()
+
+    @property
     def bond_style(self) -> str:
-        for rb in self._style_btns.buttons():
-            if rb.isChecked():
-                return rb.text().lower()
-        return "gradient"
+        text = self._style_combo.currentText()
+        if text == "Unicolor":
+            return "unicolor"
+        return text.lower()
+
+    @property
+    def bond_color(self) -> str:
+        return self._bond_color
 
     def _edit_atom_colors(self):
         mol = self.parent()._canvas.molecule if self.parent() else None
@@ -462,6 +500,8 @@ class AppearanceDialog(QDialog):
             "atom_scale": self.ball_scale,
             "bond_width_px": self.bond_width,
             "bond_style": self.bond_style,
+            "bond_color": self.bond_color,
+            "atom_border": self.atom_border,
             "color_overrides": self._color_overrides,
         }
         try:
@@ -475,10 +515,10 @@ class AppearanceDialog(QDialog):
     def _restore_defaults(self):
         self._ball_slider.setValue(70)
         self._bondw_slider.setValue(10)
-        for rb in self._style_btns.buttons():
-            if rb.text().lower() == "grey":
-                rb.setChecked(True)
-                break
+        self._style_combo.setCurrentText("Unicolor")
+        self._bond_color = "#444444"
+        self._update_unicolor_btn()
+        self._border_cb.setChecked(True)
         self._color_overrides = {}
         self._on_change()
 
@@ -1545,6 +1585,8 @@ class MoleculeCanvas(QSvgWidget):
         self.bond_width_px  = 10.0
         self.background     = "#ffffff"
         self.bond_style     = "gradient"
+        self.bond_color     = "#444444"
+        self.atom_border    = True
         self.color_overrides: dict = {}
         self.animation_phase: float = 0.0
         self.animation_amplitude: float = 0.0
@@ -1562,6 +1604,8 @@ class MoleculeCanvas(QSvgWidget):
         self.build_mode: bool = False
         self.build_element: str = "C"
         self.auto_adjust_h: bool = False
+        self.bond_order_disabled: bool = False
+        self._saved_bond_orders: list[int] | None = None
 
     # ── drag and drop ─────────────────────────────────────────────────────────
 
@@ -1655,8 +1699,10 @@ class MoleculeCanvas(QSvgWidget):
                 atom_scale=self.atom_scale,
                 bond_width_px=self.bond_width_px,
                 bond_style=self.bond_style,
+                bond_color=self.bond_color,
                 background=self.background,
                 color_overrides=self.color_overrides or None,
+                atom_border=self.atom_border,
                 active_vectors=self.active_vectors,
                 animation_phase=self.animation_phase,
                 animation_amplitude=self.animation_amplitude,
@@ -1795,7 +1841,10 @@ class MoleculeCanvas(QSvgWidget):
             b_idx = self._get_hit_bond(event.position().toPoint())
             if b_idx is not None:
                 self.requestHistorySave.emit()
-                self.molecule.bonds[b_idx].order = (self.molecule.bonds[b_idx].order % 3) + 1
+                if self.bond_order_disabled:
+                    self.molecule.bonds[b_idx].order = 1
+                else:
+                    self.molecule.bonds[b_idx].order = (self.molecule.bonds[b_idx].order % 3) + 1
                 
                 if self.auto_adjust_h:
                     at1, at2 = self.molecule.atoms[self.molecule.bonds[b_idx].i], self.molecule.atoms[self.molecule.bonds[b_idx].j]
@@ -2464,6 +2513,13 @@ class MainWindow(QMainWindow):
         act_ff = QAction("Optimize Settings…", self)
         act_ff.triggered.connect(self._edit_ff_settings)
         self._menu_build.addAction(act_ff)
+
+        self._menu_build.addSeparator()
+
+        self._act_bond_order = QAction("Disable Bond Order", self)
+        self._act_bond_order.setCheckable(True)
+        self._act_bond_order.triggered.connect(self._toggle_bond_order)
+        self._menu_build.addAction(self._act_bond_order)
 
         self._menu_build.addSeparator()
 
@@ -3228,6 +3284,25 @@ class MainWindow(QMainWindow):
     def _on_auto_h_toggle(self, checked: bool):
         self._canvas.auto_adjust_h = checked
 
+    def _toggle_bond_order(self, checked: bool):
+        self._canvas.bond_order_disabled = checked
+        if checked:
+            if self._canvas.molecule:
+                self._canvas._saved_bond_orders = [b.order for b in self._canvas.molecule.bonds]
+                for b in self._canvas.molecule.bonds:
+                    b.order = 1
+            self._act_bond_order.setText("Enable Bond Order")
+            self._status.showMessage("Bond order disabled — all bonds set to single")
+        else:
+            if self._canvas.molecule and self._canvas._saved_bond_orders is not None:
+                for i, b in enumerate(self._canvas.molecule.bonds):
+                    if i < len(self._canvas._saved_bond_orders):
+                        b.order = self._canvas._saved_bond_orders[i]
+                self._canvas._saved_bond_orders = None
+            self._act_bond_order.setText("Disable Bond Order")
+            self._status.showMessage("Bond order enabled — click bonds to cycle order")
+        self._canvas.request_render()
+
     def _clear_molecule(self):
         if QMessageBox.question(self, "Clear", "Clear the entire molecule?") == QMessageBox.StandardButton.Yes:
             self._save_history()
@@ -3358,18 +3433,23 @@ class MainWindow(QMainWindow):
         self._canvas.atom_scale = cfg.get("atom_scale", self._canvas.atom_scale)
         self._canvas.bond_width_px = cfg.get("bond_width_px", self._canvas.bond_width_px)
         self._canvas.bond_style = cfg.get("bond_style", self._canvas.bond_style)
+        self._canvas.bond_color = cfg.get("bond_color", self._canvas.bond_color)
+        self._canvas.atom_border = cfg.get("atom_border", self._canvas.atom_border)
         self._color_overrides = cfg.get("color_overrides", {})
         self._canvas.color_overrides = self._color_overrides
         self._canvas.request_render()
 
     def _edit_appearance(self):
         orig = (self._canvas.atom_scale, self._canvas.bond_width_px,
-                self._canvas.bond_style, dict(self._color_overrides))
+                self._canvas.bond_style, dict(self._color_overrides),
+                self._canvas.atom_border, self._canvas.bond_color)
 
-        def _live_update(ball, bw, style, colors):
+        def _live_update(ball, bw, style, colors, border, bcol):
             self._canvas.atom_scale = ball
             self._canvas.bond_width_px = bw
             self._canvas.bond_style = style
+            self._canvas.bond_color = bcol
+            self._canvas.atom_border = border
             self._color_overrides = colors
             self._canvas.color_overrides = colors
             if self._canvas.molecule:
@@ -3381,6 +3461,8 @@ class MainWindow(QMainWindow):
             self._canvas.atom_scale = dlg.ball_scale
             self._canvas.bond_width_px = dlg.bond_width
             self._canvas.bond_style = dlg.bond_style
+            self._canvas.bond_color = dlg.bond_color
+            self._canvas.atom_border = dlg.atom_border
             self._color_overrides = dlg._color_overrides
             self._canvas.color_overrides = dlg._color_overrides
             if self._canvas.molecule:
@@ -3388,7 +3470,8 @@ class MainWindow(QMainWindow):
             self._canvas.request_render()
         else:
             (self._canvas.atom_scale, self._canvas.bond_width_px,
-             self._canvas.bond_style, self._color_overrides) = orig
+             self._canvas.bond_style, self._color_overrides,
+             self._canvas.atom_border, self._canvas.bond_color) = orig
             self._canvas.color_overrides = self._color_overrides
             if self._canvas.molecule:
                 self._legend.update_for(self._canvas.molecule, self._color_overrides)
