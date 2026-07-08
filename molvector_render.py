@@ -8,6 +8,7 @@ Parsers:
   parse_gaussian(text)        — Gaussian .gjf / .com input
   parse_gaussian_log(text)    — Gaussian .log / .out output (last geometry)
   parse_pdb(text)             — standard PDB format
+  parse_mol(text, name)       — MDL Molfile V2000 / V3000 format
   infer_bonds(mol)            — distance-threshold bond detection
 
 Renderer:
@@ -17,6 +18,7 @@ Writers:
   save_xyz(mol)               — returns XYZ string
   save_gaussian_input(mol)    — returns GJF string
   save_pdb(mol)               — returns PDB string
+  save_mol(mol)               — returns MDL Molfile V2000 string
 
 Force Field:
   optimize_geometry(mol, ...) — OpenBabel-backed MMFF94s/UFF geometry optimization
@@ -369,6 +371,192 @@ def parse_gaussian(text: str) -> Molecule:
         raise ValueError("No valid atoms found in Gaussian input.")
 
     # Override name with formula for consistency
+    mol.name = chemical_formula(mol)
+    return mol
+
+
+def parse_mol(text: str, name: str = "Molecule") -> Molecule:
+    """
+    MDL Molfile V2000 / V3000 parser.
+    Supports both V2000 and V3000 formats.
+    """
+    lines = text.splitlines()
+    if len(lines) < 4:
+        raise ValueError("Too few lines for a Molfile.")
+
+    name = lines[0].strip() or name
+
+    # Detect V3000: the "V3000" marker appears on the counts line (4th line),
+    # but files may have blank lines. Check first 10 lines for the marker.
+    is_v3000 = any("V3000" in line for line in lines[:10])
+
+    if is_v3000:
+        return _parse_mol_v3000(text, name)
+    return _parse_mol_v2000(text, name)
+
+
+def _parse_mol_v2000(text: str, name: str) -> Molecule:
+    lines = text.splitlines()
+    counts_line = ""
+    counts_idx = -1
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s and "V2000" in s:
+            counts_line = s
+            counts_idx = i
+            break
+    if counts_idx < 0:
+        raise ValueError("Could not find V2000 counts line in MOL file.")
+    counts_parts = counts_line.split()
+    if not counts_parts:
+        raise ValueError("Could not parse counts line in MOL file.")
+    n_atoms = int(counts_parts[0])
+    n_bonds = int(counts_parts[1]) if len(counts_parts) > 1 else 0
+
+    atom_lines = []
+    bond_lines = []
+    props_start = counts_idx + 1 + n_atoms + n_bonds
+
+    for i in range(counts_idx + 1, counts_idx + 1 + n_atoms):
+        if i < len(lines):
+            atom_lines.append(lines[i])
+    for i in range(counts_idx + 1 + n_atoms, counts_idx + 1 + n_atoms + n_bonds):
+        if i < len(lines):
+            bond_lines.append(lines[i])
+
+    atoms = []
+    for line in atom_lines:
+        try:
+            x = float(line[0:10].strip())
+            y = float(line[10:20].strip())
+            z = float(line[20:30].strip())
+            elem = line[31:34].strip()
+            if not elem:
+                elem = line[30:33].strip()
+            if not elem or not elem.isalpha():
+                raise ValueError(f"Invalid element in atom line: {line}")
+            elem = elem.capitalize()
+            atoms.append(Atom(elem, x, y, z))
+        except (ValueError, IndexError):
+            continue
+
+    if not atoms:
+        raise ValueError("No valid atoms found in MOL file.")
+
+    bonds = []
+    seen_bonds = set()
+    for line in bond_lines:
+        try:
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            i = int(parts[0]) - 1
+            j = int(parts[1]) - 1
+            order = int(parts[2])
+            if order == 4:
+                order = 5  # aromatic -> our resonance bond type
+            if i < len(atoms) and j < len(atoms) and i != j:
+                a, b = min(i, j), max(i, j)
+                key = (a, b)
+                if key not in seen_bonds:
+                    seen_bonds.add(key)
+                    bonds.append(Bond(a, b, order))
+        except (ValueError, IndexError):
+            continue
+
+    # Parse properties block for charge
+    import re
+    mol_charge = 0
+    for line in lines[props_start:]:
+        s = line.strip()
+        if s == "M  END":
+            break
+        if s.startswith("M  CHG"):
+            parts = s.split()
+            # M  CHG n a1 c1 a2 c2 ...
+            try:
+                n = int(parts[2])
+                for k in range(n):
+                    aidx = int(parts[3 + k * 2]) - 1
+                    chg = int(parts[4 + k * 2])
+                    mol_charge += chg
+            except (ValueError, IndexError):
+                pass
+
+    mol = Molecule(name=name, atoms=atoms, bonds=bonds, charge=mol_charge)
+    mol.name = chemical_formula(mol)
+    return mol
+
+
+def _parse_mol_v3000(text: str, name: str) -> Molecule:
+    lines = text.splitlines()
+    atoms, bonds = [], []
+    seen_bonds = set()
+    mol_charge = 0
+    in_atom_block = False
+    in_bond_block = False
+
+    for line in lines:
+        s = line.strip()
+        if "BEGIN ATOM" in s:
+            in_atom_block = True
+            continue
+        if "BEGIN BOND" in s:
+            in_bond_block = True
+            continue
+        if "END ATOM" in s:
+            in_atom_block = False
+            continue
+        if "END BOND" in s:
+            in_bond_block = False
+            continue
+
+        if in_atom_block:
+            try:
+                parts = s.split()
+                if len(parts) >= 7:
+                    elem = parts[3]
+                    x = float(parts[4])
+                    y = float(parts[5])
+                    z = float(parts[6])
+                    atoms.append(Atom(elem, x, y, z))
+            except (ValueError, IndexError):
+                continue
+
+        if in_bond_block:
+            try:
+                parts = s.split()
+                if len(parts) >= 6:
+                    order = int(parts[3])
+                    i = int(parts[4]) - 1
+                    j = int(parts[5]) - 1
+                    if order == 4:
+                        order = 5
+                    if i < len(atoms) and j < len(atoms) and i != j:
+                        a, b = min(i, j), max(i, j)
+                        key = (a, b)
+                        if key not in seen_bonds:
+                            seen_bonds.add(key)
+                            bonds.append(Bond(a, b, order))
+            except (ValueError, IndexError):
+                continue
+
+        # Parse charge from V3000 properties
+        if "M  CHG" in s or "M  V30" in s:
+            import re
+            chg_match = re.search(r"CHG\s+(\d+)\s+(-?\d+)", s)
+            if chg_match:
+                try:
+                    aidx = int(chg_match.group(1)) - 1
+                    chg = int(chg_match.group(2))
+                    mol_charge += chg
+                except (ValueError, IndexError):
+                    pass
+
+    if not atoms:
+        raise ValueError("No valid atoms found in V3000 MOL file.")
+
+    mol = Molecule(name=name, atoms=atoms, bonds=bonds, charge=mol_charge)
     mol.name = chemical_formula(mol)
     return mol
 
@@ -787,6 +975,43 @@ def save_pdb(mol: "Molecule") -> str:
         
     lines.append("END")
     return "\n".join(lines)
+
+def save_mol(mol: "Molecule") -> str:
+    """Produce an MDL Molfile V2000 string."""
+    lines = [
+        mol.name[:80],
+        "  Molvector",
+        "",
+        f" {len(mol.atoms):3d}{len(mol.bonds):3d}  0  0  0  0  0  0  0  0999 V2000",
+    ]
+    for a in mol.atoms:
+        lines.append(
+            f"{a.x:10.4f}{a.y:10.4f}{a.z:10.4f} {a.element:<3s} 0  0  0  0  0  0  0  0  0  0  0  0"
+        )
+    for b in mol.bonds:
+        bo = b.order if b.order in (1, 2, 3) else 1
+        lines.append(f"{b.i+1:3d}{b.j+1:3d}{bo:3d}  0  0  0  0")
+    if mol.charge != 0:
+        # Find atoms with non-zero formal charge
+        # Approximate by evenly distributing total charge
+        chg_parts = []
+        if len(mol.atoms) > 0:
+            q = mol.charge // len(mol.atoms)
+            r = mol.charge % len(mol.atoms)
+            for i in range(len(mol.atoms)):
+                c = q + (1 if i < r else 0)
+                if c != 0:
+                    chg_parts.append(f"{i+1:4d}{c:4d}")
+            if chg_parts:
+                # Must write in pairs; M  CHG n a1 c1 a2 c2 ...
+                # Group in chunks of 8 pairs to fit line length
+                n_per_line = 8
+                for chunk_start in range(0, len(chg_parts), n_per_line):
+                    chunk = chg_parts[chunk_start:chunk_start + n_per_line]
+                    n = len(chunk)
+                    lines.append("M  CHG" + f"{n:3d}" + "".join(chunk))
+    lines.append("M  END")
+    return "\n".join(lines) + "\n"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

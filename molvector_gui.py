@@ -48,11 +48,13 @@ except ImportError:
 # ── renderer / parsers ───────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(__file__))
 from molvector_render import (
-    parse_xyz, parse_gaussian, parse_gaussian_log, parse_pdb, infer_bonds,
+    parse_xyz, parse_gaussian, parse_gaussian_log, parse_pdb, parse_mol,
+    infer_bonds,
     render_molecule, Molecule, CPK_BASE, CPK_DARK, VDW_RADII,
     lighten, darken, hex_to_rgb, rgb_to_hex, auto_dark,
     chemical_formula, molecular_mass, VibrationalMode, ExcitedState,
-    save_xyz, save_gaussian_input, save_pdb, project_molecule, Atom, Bond,
+    save_xyz, save_gaussian_input, save_pdb, save_mol, project_molecule,
+    Atom, Bond,
     optimize_geometry, HAS_OPENBABEL,
 )
 
@@ -2759,6 +2761,7 @@ class MainWindow(QMainWindow):
             ("Gaussian log", lambda t: parse_gaussian_log(t)),
             ("XYZ", lambda t: parse_xyz(t, name=name)),
             ("PDB", lambda t: parse_pdb(t, name=name)),
+            ("MDL Molfile", lambda t: parse_mol(t, name=name)),
             ("Gaussian input", lambda t: parse_gaussian(t))
         ]
 
@@ -3054,9 +3057,9 @@ class MainWindow(QMainWindow):
     def _open_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Molecule File", "",
-            "All supported (*.xyz *.gjf *.com *.log *.out *.pdb *.txt);;"
+            "All supported (*.xyz *.gjf *.com *.log *.out *.pdb *.mol *.txt);;"
             "XYZ (*.xyz);;Gaussian input (*.gjf *.com);;"
-            "Gaussian log (*.log *.out);;PDB (*.pdb);;Text (*.txt);;All files (*)"
+            "Gaussian log (*.log *.out);;PDB (*.pdb);;MDL Molfile (*.mol);;Text (*.txt);;All files (*)"
         )
         if path:
             self._load_and_display(path)
@@ -3212,7 +3215,7 @@ class MainWindow(QMainWindow):
             return
             
         safe_name = get_safe_filename(mol.name)
-        filters = "XYZ (*.xyz);;PDB (*.pdb);;Gaussian input (*.gjf *.com);;All files (*)"
+        filters = "XYZ (*.xyz);;PDB (*.pdb);;MDL Molfile (*.mol);;Gaussian input (*.gjf *.com);;All files (*)"
         path, sel_filter = QFileDialog.getSaveFileName(
             self, "Save Molecule As", f"{safe_name}.xyz", filters
         )
@@ -3225,6 +3228,8 @@ class MainWindow(QMainWindow):
                 text = save_xyz(mol)
             elif ext == ".pdb":
                 text = save_pdb(mol)
+            elif ext == ".mol":
+                text = save_mol(mol)
             elif ext in (".gjf", ".com"):
                 text = save_gaussian_input(mol)
             else:
