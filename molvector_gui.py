@@ -2604,7 +2604,8 @@ class MainWindow(QMainWindow):
             return a
 
         tb_action("Open",      self._open_file, "Ctrl+O", "Open molecule file")
-        tb_action("Save SVG",  self._save_svg,  None, "Export current view as SVG")
+        tb_action("Save",        self._save_as,      "Ctrl+S", "Save molecule file")
+        tb_action("Export view", self._export_view,  "Ctrl+E", "Export view as PDF/PNG/SVG")
         tb.addSeparator()
         tb_action("Reset",     lambda: self._canvas.reset_view())
         tb.addSeparator()
