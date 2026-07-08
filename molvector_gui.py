@@ -2792,6 +2792,7 @@ class MainWindow(QMainWindow):
         dlg.viewSpectrum.connect(self._on_view_spectrum)
         dlg.animationToggled.connect(self._on_anim_toggle)
         dlg.vectorsToggled.connect(self._on_vectors_toggle)
+        dlg.finished.connect(self._on_calculations_closed)
         dlg.show()
 
     def _on_anim_toggle(self, enabled: bool):
@@ -2813,6 +2814,16 @@ class MainWindow(QMainWindow):
         self._canvas.animation_phase = self._anim_phase
         self._canvas.animation_amplitude = 0.6
         self._canvas.request_render()
+
+    def _on_calculations_closed(self):
+        self._anim_timer.stop()
+        self._anim_phase = 0.0
+        self._canvas.animation_phase = 0.0
+        self._canvas.animation_amplitude = 0.0
+        self._canvas.active_vectors = None
+        self._canvas.arrows = None
+        self._canvas.request_render()
+        self._status.clearMessage()
 
     def _on_view_spectrum(self, kind):
         if kind == "ir": self._view_ir_spectrum()
