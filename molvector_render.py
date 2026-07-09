@@ -29,6 +29,7 @@ import numpy as np
 import svgwrite
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
+import mol_strudel as strudel
 
 # ── OpenBabel data directory setup (cross-platform) ───────────────────────────
 try:
@@ -213,6 +214,20 @@ def molecular_mass(mol: "Molecule") -> float:
     """Return the monoisotopic-approximate molecular mass in Da (g/mol)."""
     return sum(ATOMIC_MASSES.get(a.element, 0.0) for a in mol.atoms)
 
+def calculate_rotational_constants(mol: "Molecule") -> Tuple[float, float, float]:
+    """Return the rotational constants (A, B, C) in MHz for the molecule."""
+    coords = []
+    masses = []
+    for atom in mol.atoms:
+        print(atom)
+        coords.append((atom.x, atom.y, atom.z))
+        masses.append(ATOMIC_MASSES[atom.element])
+    
+    coords = np.array(coords)
+    masses = np.array(masses)
+    moments_of_inertia, eigvecs = strudel.diagonalize_I_tensor(coords, masses)
+    rot_consts = strudel.moments_of_inertia_to_rotational_constants(moments_of_inertia)
+    return rot_consts
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PARSERS

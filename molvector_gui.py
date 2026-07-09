@@ -55,7 +55,7 @@ from molvector_render import (
     chemical_formula, molecular_mass, VibrationalMode, ExcitedState,
     save_xyz, save_gaussian_input, save_pdb, save_mol, project_molecule,
     Atom, Bond,
-    optimize_geometry, HAS_OPENBABEL,
+    optimize_geometry, HAS_OPENBABEL, calculate_rotational_constants,
 )
 
 def load_colored_icon(svg_path: str, color: str, size: int = 22) -> QIcon:
@@ -2474,6 +2474,10 @@ class MainWindow(QMainWindow):
         self._menu_calc.addAction(act_g16)
         self._menu_calc.setEnabled(True)
 
+        act_rotconstant = QAction("Calculate Rotational Constants", self)
+        act_rotconstant.triggered.connect(self._calculate_rotational_constants)
+        self._menu_calc.addAction(act_rotconstant)
+
         # ── Build ──
         self._menu_build = mb.addMenu("&Build")
         
@@ -2799,7 +2803,7 @@ class MainWindow(QMainWindow):
 
     def _update_calculations_menu(self, mol: Molecule):
         # Remove any actions beyond the first (Generate G16 Input…)
-        while len(self._menu_calc.actions()) > 1:
+        while len(self._menu_calc.actions()) > 2:
             self._menu_calc.removeAction(self._menu_calc.actions()[-1])
 
         if mol and (mol.vibrational_modes or mol.excited_states):
@@ -2831,6 +2835,18 @@ class MainWindow(QMainWindow):
         dlg.vectorsToggled.connect(self._on_vectors_toggle)
         dlg.finished.connect(self._on_calculations_closed)
         dlg.show()
+
+    def _calculate_rotational_constants(self):
+        mol = self._canvas.molecule
+        if not mol:
+            QMessageBox.information(self, 'No molecule', "Load or build a molecule first.")
+            return
+
+        rot_consts = calculate_rotational_constants(mol)
+    
+        QMessageBox.information(self, 'Rotational constants', f"Rotational constants:\nA: {rot_consts[0]:10.4f} MHz\nB: {rot_consts[1]:10.4f} MHz\nC: {rot_consts[2]:10.4f} MHz")
+        return(rot_consts)
+
 
     def _on_anim_toggle(self, enabled: bool):
         if enabled:
@@ -3579,7 +3595,6 @@ class MainWindow(QMainWindow):
         self._zoom_slider.blockSignals(True)
         self._zoom_slider.setValue(pct)
         self._zoom_slider.blockSignals(False)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
