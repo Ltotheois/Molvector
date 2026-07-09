@@ -931,7 +931,7 @@ def hex_to_rgb(h: str) -> Tuple[int,int,int]:
     return (int(h[0:2],16), int(h[2:4],16), int(h[4:6],16))
 
 def rgb_to_hex(r, g, b) -> str:
-    return "#{:02x}{:02x}{:02x}".format(int(r), int(g), int(b))
+    return "#{:02x}{:02x}{:02x}".format(max(0,min(255,int(r))), max(0,min(255,int(g))), max(0,min(255,int(b))))
 
 def lighten(hex_color: str, factor: float) -> str:
     r,g,b = hex_to_rgb(hex_color)
@@ -949,6 +949,17 @@ def interpolate_color(c1: str, c2: str, t: float) -> str:
     r2, g2, b2 = hex_to_rgb(c2)
     return rgb_to_hex(r1 + (r2-r1)*t, g1 + (g2-g1)*t, b1 + (b2-b1)*t)
 
+# Light position presets: maps name -> (gradient_cx, gradient_cy, Lx, Ly, Lz)
+LIGHT_POSITIONS = {
+    "top-left":      ("0.33", "0.28",  -0.34, -0.44,  0.83),
+    "top":           ("0.50", "0.10",   0.00, -0.50,  0.87),
+    "top-right":     ("0.67", "0.28",   0.34, -0.44,  0.83),
+    "left":          ("0.10", "0.50",  -0.50,  0.00,  0.87),
+    "right":         ("0.90", "0.50",   0.50,  0.00,  0.87),
+    "bottom-left":   ("0.33", "0.72",  -0.34,  0.44,  0.83),
+    "bottom":        ("0.50", "0.90",   0.00,  0.50,  0.87),
+    "bottom-right":  ("0.67", "0.72",   0.34,  0.44,  0.83),
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # WRITERS
@@ -1314,10 +1325,16 @@ def render_molecule(
     bond_style: str = "gradient",
     bond_color: str = "#444444",
     atom_border: bool = True,
+    lighting_intensity: float = 1.0,
+    light_position: str = "top-left",
 ) -> str:
 
     rot = rot_matrix_override if rot_matrix_override is not None \
           else rotation_matrix(rot_x, rot_y, rot_z)
+
+    if light_position not in LIGHT_POSITIONS:
+        light_position = "top-left"
+    grad_cx, grad_cy, Lx, Ly, Lz = LIGHT_POSITIONS[light_position]
 
     base_colors = dict(CPK_BASE)
     dark_colors  = dict(CPK_DARK)
@@ -1371,14 +1388,15 @@ def render_molecule(
             return gid
         base = base_colors.get(elem, DEFAULT_BASE)
         dark = dark_colors.get(elem, DEFAULT_DARK)
-        g = dwg.radialGradient(id=gid, center=("0.33","0.28"), r="0.68")
-        g["fx"]="0.33"; g["fy"]="0.28"
+        li = lighting_intensity
+        g = dwg.radialGradient(id=gid, center=(grad_cx, grad_cy), r="0.68")
+        g["fx"]=grad_cx; g["fy"]=grad_cy
         g["gradientUnits"] = "objectBoundingBox"
-        g.add_stop_color("0%",   lighten(base,0.70), 1.0)
-        g.add_stop_color("18%",  lighten(base,0.40), 1.0)
-        g.add_stop_color("48%",  lighten(base,0.15), 1.0)
-        g.add_stop_color("78%",  base,               1.0)
-        g.add_stop_color("100%", dark,               1.0)
+        g.add_stop_color("0%",   lighten(base,0.70*li), 1.0)
+        g.add_stop_color("18%",  lighten(base,0.40*li), 1.0)
+        g.add_stop_color("48%",  lighten(base,0.15*li), 1.0)
+        g.add_stop_color("78%",  base,                  1.0)
+        g.add_stop_color("100%", darken(base,0.65*li),  1.0)
         defs.add(g)
         registered.add(gid)
         return gid
@@ -1573,19 +1591,19 @@ def render_molecule(
         if kind == "bond_half":
             _, pts, px, py, indiv_hw, b_id, base, dark = item
             
-            Lx, Ly, Lz = -0.34, -0.44, 0.83
             A = px * Lx + py * Ly
             I_max = math.hypot(A, Lz)
             if I_max == 0: I_max = 1e-6
             
             def get_color_from_ratio(r: float) -> str:
                 d = 1.0 - r
+                li = lighting_intensity
                 stops = [
-                    (0.00, lighten(base, 0.70)),
-                    (0.18, lighten(base, 0.40)),
-                    (0.48, lighten(base, 0.15)),
+                    (0.00, lighten(base, 0.70*li)),
+                    (0.18, lighten(base, 0.40*li)),
+                    (0.48, lighten(base, 0.15*li)),
                     (0.78, base),
-                    (1.00, dark)
+                    (1.00, interpolate_color(base, dark, li))
                 ]
                 if d <= 0: return stops[0][1]
                 if d >= 1: return stops[-1][1]
@@ -1647,7 +1665,8 @@ def render_molecule(
 
             def mat_color(base, dark, ratio):
                 d = 1.0 - ratio
-                stops = [(0.00, lighten(base, 0.70)), (0.18, lighten(base, 0.40)), (0.48, lighten(base, 0.15)), (0.78, base), (1.00, dark)]
+                li = lighting_intensity
+                stops = [(0.00, lighten(base, 0.70*li)), (0.18, lighten(base, 0.40*li)), (0.48, lighten(base, 0.15*li)), (0.78, base), (1.00, interpolate_color(base, dark, li))]
                 if d <= 0: return stops[0][1]
                 if d >= 1: return stops[-1][1]
                 for i in range(len(stops)-1):
@@ -1670,7 +1689,6 @@ def render_molecule(
             rx = (x0_r + x1_r) / 2; ry = (y0_r + y1_r) / 2
             angle = math.degrees(math.atan2(-px, py))
 
-            Lx, Ly, Lz = -0.34, -0.44, 0.83
             A_sh = px * Lx + py * Ly
             I_max = math.hypot(A_sh, Lz)
             if I_max == 0: I_max = 1e-6
@@ -1705,7 +1723,7 @@ def render_molecule(
                 s = 1.0 - 2.0 * v
                 intensity = max(0.0, s * A_sh + math.sqrt(max(0.0, 1.0 - s**2)) * Lz)
                 ratio = intensity / I_max
-                sh_g.add_stop_color(f"{v*100:.1f}%", "#000000", (1.0 - ratio) * 0.75)
+                sh_g.add_stop_color(f"{v*100:.1f}%", "#000000", (1.0 - ratio) * 0.75 * lighting_intensity)
             defs.add(sh_g)
 
             molecule_group.add(dwg.rect(

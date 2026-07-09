@@ -349,13 +349,15 @@ class AppearanceDialog(QDialog):
     CONFIG_FILE = os.path.join(os.path.dirname(__file__), "molvector_config.json")
 
     def __init__(self, atom_scale, bond_width, bond_style, color_overrides,
-                 atom_border=True, bond_color="#444444", live_callback=None, parent=None):
+                 atom_border=True, bond_color="#444444", lighting_intensity=1.0,
+                 light_position="top-left", live_callback=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Appearance")
         self.setMinimumWidth(400)
         self._live_callback = live_callback
         self._orig = (atom_scale, bond_width, bond_style,
-                      dict(color_overrides), atom_border, bond_color)
+                      dict(color_overrides), atom_border, bond_color,
+                      lighting_intensity, light_position)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -386,6 +388,29 @@ class AppearanceDialog(QDialog):
         bondw_row.addWidget(self._bondw_slider)
         bondw_row.addWidget(self._bondw_lbl)
         form.addRow("Bond Width:", bondw_row)
+
+        # Lighting intensity
+        self._lighting_slider = QSlider(Qt.Orientation.Horizontal)
+        self._lighting_slider.setRange(0, 200)
+        self._lighting_slider.setValue(int(lighting_intensity * 100))
+        self._lighting_slider.setFixedWidth(160)
+        self._lighting_lbl = QLabel(f"{lighting_intensity:.2f}")
+        self._lighting_slider.valueChanged.connect(self._on_change)
+        lighting_row = QHBoxLayout()
+        lighting_row.addWidget(self._lighting_slider)
+        lighting_row.addWidget(self._lighting_lbl)
+        form.addRow("Lighting:", lighting_row)
+
+        # Light position
+        self._light_pos_combo = QComboBox()
+        self._light_pos_combo.addItems([
+            "top-left", "top", "top-right",
+            "left", "right",
+            "bottom-left", "bottom", "bottom-right",
+        ])
+        self._light_pos_combo.setCurrentText(light_position)
+        self._light_pos_combo.currentTextChanged.connect(self._on_change)
+        form.addRow("Light Position:", self._light_pos_combo)
 
         # Atom colours + border (init early so _on_change can access them)
         self._color_overrides = color_overrides
@@ -441,10 +466,14 @@ class AppearanceDialog(QDialog):
         layout.addLayout(btn_row)
 
     def _on_change(self):
+        self._ball_lbl.setText(f"{self.ball_scale:.2f}")
+        self._bondw_lbl.setText(f"{self.bond_width:.0f}")
+        self._lighting_lbl.setText(f"{self.lighting_intensity:.2f}")
         if self._live_callback:
             self._live_callback(
                 self.ball_scale, self.bond_width, self.bond_style,
                 self._color_overrides, self.atom_border, self.bond_color,
+                self.lighting_intensity, self.light_position,
             )
 
     def _on_style_change(self, text: str):
@@ -486,6 +515,14 @@ class AppearanceDialog(QDialog):
     def bond_color(self) -> str:
         return self._bond_color
 
+    @property
+    def lighting_intensity(self) -> float:
+        return self._lighting_slider.value() / 100.0
+
+    @property
+    def light_position(self) -> str:
+        return self._light_pos_combo.currentText()
+
     def _edit_atom_colors(self):
         mol = self.parent()._canvas.molecule if self.parent() else None
         if mol is None:
@@ -504,6 +541,8 @@ class AppearanceDialog(QDialog):
             "bond_style": self.bond_style,
             "bond_color": self.bond_color,
             "atom_border": self.atom_border,
+            "lighting_intensity": self.lighting_intensity,
+            "light_position": self.light_position,
             "color_overrides": self._color_overrides,
         }
         try:
@@ -520,6 +559,8 @@ class AppearanceDialog(QDialog):
         self._style_combo.setCurrentText("Unicolor")
         self._bond_color = "#444444"
         self._update_unicolor_btn()
+        self._lighting_slider.setValue(100)
+        self._light_pos_combo.setCurrentText("top-left")
         self._border_cb.setChecked(True)
         self._color_overrides = {}
         self._on_change()
@@ -1592,6 +1633,8 @@ class MoleculeCanvas(QSvgWidget):
         self.bond_color     = "#444444"
         self.atom_border    = True
         self.color_overrides: dict = {}
+        self.lighting_intensity: float = 1.0
+        self.light_position: str = "top-left"
         self.animation_phase: float = 0.0
         self.animation_amplitude: float = 0.0
 
@@ -1707,6 +1750,8 @@ class MoleculeCanvas(QSvgWidget):
                 background=self.background,
                 color_overrides=self.color_overrides or None,
                 atom_border=self.atom_border,
+                lighting_intensity=self.lighting_intensity,
+                light_position=self.light_position,
                 active_vectors=self.active_vectors,
                 animation_phase=self.animation_phase,
                 animation_amplitude=self.animation_amplitude,
@@ -2696,7 +2741,7 @@ class MainWindow(QMainWindow):
         tb_action("Save",        self._save_as,      "Ctrl+S", "Save molecule file")
         tb_action("Export view", self._export_view,  "Ctrl+E", "Export view as PDF/PNG/SVG")
         tb.addSeparator()
-        tb_action("Reset",     lambda: self._canvas.reset_view())
+        tb_action("Reset view",     lambda: self._canvas.reset_view())
         tb.addSeparator()
 
         # Zoom readout
@@ -3562,6 +3607,8 @@ class MainWindow(QMainWindow):
         self._canvas.bond_style = cfg.get("bond_style", self._canvas.bond_style)
         self._canvas.bond_color = cfg.get("bond_color", self._canvas.bond_color)
         self._canvas.atom_border = cfg.get("atom_border", self._canvas.atom_border)
+        self._canvas.lighting_intensity = cfg.get("lighting_intensity", self._canvas.lighting_intensity)
+        self._canvas.light_position = cfg.get("light_position", self._canvas.light_position)
         self._color_overrides = cfg.get("color_overrides", {})
         self._canvas.color_overrides = self._color_overrides
         self._canvas.request_render()
@@ -3569,14 +3616,17 @@ class MainWindow(QMainWindow):
     def _edit_appearance(self):
         orig = (self._canvas.atom_scale, self._canvas.bond_width_px,
                 self._canvas.bond_style, dict(self._color_overrides),
-                self._canvas.atom_border, self._canvas.bond_color)
+                self._canvas.atom_border, self._canvas.bond_color,
+                self._canvas.lighting_intensity, self._canvas.light_position)
 
-        def _live_update(ball, bw, style, colors, border, bcol):
+        def _live_update(ball, bw, style, colors, border, bcol, lighting, pos):
             self._canvas.atom_scale = ball
             self._canvas.bond_width_px = bw
             self._canvas.bond_style = style
             self._canvas.bond_color = bcol
             self._canvas.atom_border = border
+            self._canvas.lighting_intensity = lighting
+            self._canvas.light_position = pos
             self._color_overrides = colors
             self._canvas.color_overrides = colors
             if self._canvas.molecule:
@@ -3590,6 +3640,8 @@ class MainWindow(QMainWindow):
             self._canvas.bond_style = dlg.bond_style
             self._canvas.bond_color = dlg.bond_color
             self._canvas.atom_border = dlg.atom_border
+            self._canvas.lighting_intensity = dlg.lighting_intensity
+            self._canvas.light_position = dlg.light_position
             self._color_overrides = dlg._color_overrides
             self._canvas.color_overrides = dlg._color_overrides
             if self._canvas.molecule:
@@ -3598,7 +3650,9 @@ class MainWindow(QMainWindow):
         else:
             (self._canvas.atom_scale, self._canvas.bond_width_px,
              self._canvas.bond_style, self._color_overrides,
-             self._canvas.atom_border, self._canvas.bond_color) = orig
+             self._canvas.atom_border, self._canvas.bond_color,
+             self._canvas.lighting_intensity,
+             self._canvas.light_position) = orig
             self._canvas.color_overrides = self._color_overrides
             if self._canvas.molecule:
                 self._legend.update_for(self._canvas.molecule, self._color_overrides)
