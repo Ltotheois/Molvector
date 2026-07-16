@@ -219,13 +219,14 @@ def calculate_rotational_constants(mol: "Molecule") -> Tuple[float, float, float
     coords = []
     masses = []
     for atom in mol.atoms:
-        print(atom)
         coords.append((atom.x, atom.y, atom.z))
         masses.append(ATOMIC_MASSES[atom.element])
-    
+
     coords = np.array(coords)
     masses = np.array(masses)
-    moments_of_inertia, eigvecs = strudel.diagonalize_I_tensor(coords, masses)
+
+    coords_principal_axes = strudel.transform_to_principal_axes(coords, masses)
+    moments_of_inertia, _ = strudel.diagonalize_I_tensor(coords_principal_axes, masses)
     rot_consts = strudel.moments_of_inertia_to_rotational_constants(moments_of_inertia)
     return rot_consts
 
