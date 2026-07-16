@@ -1881,6 +1881,30 @@ class MoleculeCanvas(QSvgWidget):
         self._pan  = np.array([0.0, 0.0])
         self.request_render()
 
+    def set_principal_axis_preset(self, axis_index):
+        import mol_strudel as strudel
+        from molvector_render import ATOMIC_MASSES
+        mol = self.molecule
+        if not mol or len(mol.atoms) < 2:
+            return
+        coords = np.array([[a.x, a.y, a.z] for a in mol.atoms])
+        masses = np.array([ATOMIC_MASSES.get(a.element, 0.0) for a in mol.atoms])
+        _, eigvecs = strudel.diagonalize_I_tensor(coords, masses)
+        Vt = eigvecs.T
+        if axis_index == 0:
+            cx, sx = math.cos(-math.pi/2), math.sin(-math.pi/2)
+            Ry = np.array([[cx,0,sx],[0,1,0],[-sx,0,cx]])
+            self._rot = Ry @ Vt
+        elif axis_index == 1:
+            cx, sx = math.cos(math.pi/2), math.sin(math.pi/2)
+            Rx = np.array([[1,0,0],[0,cx,-sx],[0,sx,cx]])
+            self._rot = Rx @ Vt
+        else:
+            self._rot = Vt
+        self._zoom = 1.0
+        self._pan  = np.array([0.0, 0.0])
+        self.request_render()
+
     def edit_background_color(self):
         col = QColorDialog.getColor(QColor(self.background), self, "Background Colour")
         if col.isValid():
@@ -2746,6 +2770,12 @@ class MainWindow(QMainWindow):
         ]:
             a = QAction(label, self)
             a.triggered.connect(lambda _, r=(rx,ry,rz): self._canvas.set_preset(*r))
+            presets_menu.addAction(a)
+
+        presets_menu.addSeparator()
+        for idx, label in [(0, "Along A Axis"), (1, "Along B Axis"), (2, "Along C Axis")]:
+            a = QAction(label, self)
+            a.triggered.connect(lambda _, i=idx: self._canvas.set_principal_axis_preset(i))
             presets_menu.addAction(a)
 
         view_menu.addSeparator()
