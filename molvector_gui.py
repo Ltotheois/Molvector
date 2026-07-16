@@ -19,7 +19,7 @@ Selection mode (S):
 
 Align mode (A):
   Click bond       Align molecule vertically
-  Ctrl+click bond  Align molecule horizontally
+  Shift+click bond  Align molecule horizontally
 
 Menus:
   File          Open / Save As / Export SVG / Export View / Quick SVG Export / Quit
@@ -28,6 +28,8 @@ Menus:
   Calculations  Generate G16 Input / Calculate Rotational Constants / Calculation Results
   Build         Build Mode / Selection Mode / Align Mode / Clean / Undo / Redo / Optimize / Clear All
   Help          Open Test Molecule / About
+
+  Note: On Windows/Linux use Ctrl for shortcuts; on macOS use Cmd.
 
 Dependencies:
     pip install PyQt6 numpy svgwrite
@@ -72,6 +74,16 @@ from molvector_render import (
     Atom, Bond,
     optimize_geometry, HAS_OPENBABEL, calculate_rotational_constants,
 )
+
+# ── platform-aware shortcut modifier prefix ──────────────────────────────────
+IS_MAC = sys.platform == "darwin"
+MOD = "Cmd" if IS_MAC else "Ctrl"
+
+
+def _mod(s: str) -> str:
+    """Replace 'Ctrl' with platform-appropriate modifier in a shortcut string."""
+    return s.replace("Ctrl", MOD)
+
 
 def load_colored_icon(svg_path: str, color: str, size: int = 22) -> QIcon:
     """Load an SVG file, replace #000000 fills with color, return QIcon."""
@@ -1824,6 +1836,7 @@ class MoleculeCanvas(QSvgWidget):
         self._zoom = 1.0
         self._pan  = np.array([0.0, 0.0])
         self._axes_ref = np.eye(3)
+        self._default_view = np.eye(3)
         self._drag_start: QPoint | None = None
         self._drag_mode = "none"
 
@@ -1919,6 +1932,8 @@ class MoleculeCanvas(QSvgWidget):
         self._rot  = np.eye(3)
         self._zoom = 1.0
         self._pan  = np.array([0.0, 0.0])
+        self._axes_ref = np.eye(3)
+        self._default_view = np.eye(3)
         self.selected_atoms.clear()
         # Auto-scale: fit the molecule to 80% of the smaller canvas dimension
         positions = np.array([[a.x, a.y, a.z] for a in mol.atoms])
@@ -1933,13 +1948,14 @@ class MoleculeCanvas(QSvgWidget):
         self.request_render()
 
     def reset_view(self):
-        self._rot  = np.eye(3)
+        self._rot  = self._default_view.copy()
         self._zoom = 1.0
         self._pan  = np.array([0.0, 0.0])
         self.request_render()
 
     def reset_xyz_axes(self):
         self._axes_ref = self._rot.copy()
+        self._default_view = self._rot.copy()
         self.request_render()
 
     def set_preset(self, rx, ry, rz):
@@ -2267,7 +2283,7 @@ class MoleculeCanvas(QSvgWidget):
                 if norm > 1e-10:
                     v_local_hat = v_local / norm
                     v_view = self._rot @ v_local_hat
-                    if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                         target = np.array([1.0, 0.0, 0.0])
                     else:
                         target = np.array([0.0, 1.0, 0.0])
@@ -2688,24 +2704,24 @@ class MoleculeCanvas(QSvgWidget):
 class MainWindow(QMainWindow):
 
     DEFAULT_SHORTCUTS = {
-        "open": "Ctrl+O",
-        "save_as": "Ctrl+S",
-        "export_svg": "Ctrl+Shift+S",
-        "export_view": "Ctrl+E",
-        "quick_svg_export": "Ctrl+Shift+X",
-        "quit": "Ctrl+Q",
-        "info": "Ctrl+I",
-        "settings": "Ctrl+P",
+        "open": _mod("Ctrl+O"),
+        "save_as": _mod("Ctrl+S"),
+        "export_svg": _mod("Ctrl+Shift+S"),
+        "export_view": _mod("Ctrl+E"),
+        "quick_svg_export": _mod("Ctrl+Shift+X"),
+        "quit": _mod("Ctrl+Q"),
+        "info": _mod("Ctrl+I"),
+        "settings": _mod("Ctrl+P"),
         "shortcuts": "",
         "reset_view": "R",
         "build_mode": "B",
         "selection_mode": "S",
         "align_mode": "A",
-        "clean_molecule": "Ctrl+L",
-        "undo": "Ctrl+Z",
-        "redo": "Ctrl+Shift+Z",
-        "calc_results": "Ctrl+M",
-        "open_test": "Ctrl+Alt+T",
+        "clean_molecule": _mod("Ctrl+L"),
+        "undo": _mod("Ctrl+Z"),
+        "redo": _mod("Ctrl+Shift+Z"),
+        "calc_results": _mod("Ctrl+M"),
+        "open_test": _mod("Ctrl+Shift+T"),
     }
 
     def __init__(self):
@@ -2757,13 +2773,13 @@ class MainWindow(QMainWindow):
         file_menu = mb.addMenu("&File")
 
         act_open = QAction("&Open…", self)
-        act_open.setShortcut("Ctrl+O")
+        act_open.setShortcut(_mod("Ctrl+O"))
         act_open.triggered.connect(self._open_file)
         file_menu.addAction(act_open)
         self._shortcut_actions["open"] = act_open
 
         act_save_as = QAction("Save &As…", self)
-        act_save_as.setShortcut("Ctrl+S")
+        act_save_as.setShortcut(_mod("Ctrl+S"))
         act_save_as.triggered.connect(self._save_as)
         file_menu.addAction(act_save_as)
         self._shortcut_actions["save_as"] = act_save_as
@@ -2771,19 +2787,19 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
 
         act_save_svg = QAction("Export as &SVG…", self)
-        act_save_svg.setShortcut("Ctrl+Shift+S")
+        act_save_svg.setShortcut(_mod("Ctrl+Shift+S"))
         act_save_svg.triggered.connect(self._save_svg)
         file_menu.addAction(act_save_svg)
         self._shortcut_actions["export_svg"] = act_save_svg
 
         act_export = QAction("&Export View…", self)
-        act_export.setShortcut("Ctrl+E")
+        act_export.setShortcut(_mod("Ctrl+E"))
         act_export.triggered.connect(self._export_view)
         file_menu.addAction(act_export)
         self._shortcut_actions["export_view"] = act_export
 
         act_quick_svg = QAction("Quick SVG E&xport…", self)
-        act_quick_svg.setShortcut("Ctrl+Shift+X")
+        act_quick_svg.setShortcut(_mod("Ctrl+Shift+X"))
         act_quick_svg.triggered.connect(self._quick_svg_export)
         file_menu.addAction(act_quick_svg)
         self._shortcut_actions["quick_svg_export"] = act_quick_svg
@@ -2791,7 +2807,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
 
         act_quit = QAction("&Quit", self)
-        act_quit.setShortcut("Ctrl+Q")
+        act_quit.setShortcut(_mod("Ctrl+Q"))
         act_quit.triggered.connect(self.close)
         file_menu.addAction(act_quit)
         self._shortcut_actions["quit"] = act_quit
@@ -2804,7 +2820,7 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(act_appearance)
 
         act_info = QAction("&Info…", self)
-        act_info.setShortcut("Ctrl+I")
+        act_info.setShortcut(_mod("Ctrl+I"))
         act_info.triggered.connect(self._show_molecule_info)
         edit_menu.addAction(act_info)
         self._shortcut_actions["info"] = act_info
@@ -2812,7 +2828,7 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
 
         act_settings = QAction("&Settings…", self)
-        act_settings.setShortcut("Ctrl+P")
+        act_settings.setShortcut(_mod("Ctrl+P"))
         act_settings.triggered.connect(self._edit_settings)
         edit_menu.addAction(act_settings)
         self._shortcut_actions["settings"] = act_settings
@@ -2904,19 +2920,19 @@ class MainWindow(QMainWindow):
         self._menu_build.addSeparator()
         
         act_clean_m = QAction("Clean Molecule", self)
-        act_clean_m.setShortcut("Ctrl+L")
+        act_clean_m.setShortcut(_mod("Ctrl+L"))
         act_clean_m.triggered.connect(self._clean_molecule)
         self._menu_build.addAction(act_clean_m)
         self._shortcut_actions["clean_molecule"] = act_clean_m
 
         act_undo = QAction("Undo", self)
-        act_undo.setShortcut("Ctrl+Z")
+        act_undo.setShortcut(_mod("Ctrl+Z"))
         act_undo.triggered.connect(self._undo)
         self._menu_build.addAction(act_undo)
         self._shortcut_actions["undo"] = act_undo
 
         act_redo = QAction("Redo", self)
-        act_redo.setShortcuts([QKeySequence("Ctrl+Shift+Z"), QKeySequence("Ctrl+Y")])
+        act_redo.setShortcuts([QKeySequence(_mod("Ctrl+Shift+Z")), QKeySequence(_mod("Ctrl+Y"))])
         act_redo.triggered.connect(self._redo)
         self._menu_build.addAction(act_redo)
 
@@ -2940,7 +2956,7 @@ class MainWindow(QMainWindow):
         # ── Help ──
         help_menu = mb.addMenu("&Help")
         act_open_test = QAction("Open Test Molecule", self)
-        act_open_test.setShortcut("Ctrl+Alt+T")
+        act_open_test.setShortcut(_mod("Ctrl+Shift+T"))
         act_open_test.triggered.connect(self._open_test_molecule)
         help_menu.addAction(act_open_test)
         self._shortcut_actions["open_test"] = act_open_test
@@ -3029,9 +3045,9 @@ class MainWindow(QMainWindow):
             tb.addAction(a)
             return a
 
-        tb_action("Open",      self._open_file, "Ctrl+O", "Open molecule file")
-        tb_action("Save",        self._save_as,      "Ctrl+S", "Save molecule file")
-        tb_action("Export view", self._export_view,  "Ctrl+E", "Export view as PDF/PNG/SVG")
+        tb_action("Open",      self._open_file, _mod("Ctrl+O"), "Open molecule file")
+        tb_action("Save",        self._save_as,      _mod("Ctrl+S"), "Save molecule file")
+        tb_action("Export view", self._export_view,  _mod("Ctrl+E"), "Export view as PDF/PNG/SVG")
         tb.addSeparator()
         tb_action("Reset view",     lambda: self._canvas.reset_view())
         tb.addSeparator()
@@ -3231,7 +3247,7 @@ class MainWindow(QMainWindow):
             self._menu_calc.addSeparator()
             act_results = QAction("Calculation Results…", self)
             overrides = self._load_shortcut_overrides()
-            ks = overrides.get("calc_results", "Ctrl+M")
+            ks = overrides.get("calc_results", _mod("Ctrl+M"))
             act_results.setShortcut(ks)
             act_results.triggered.connect(self._show_calculations_dialog)
             self._menu_calc.addAction(act_results)
@@ -3691,8 +3707,8 @@ class MainWindow(QMainWindow):
             self._status.showMessage("Selection: Click select atom · Drag rectangle-select · Scroll zoom")
             self._hint.setText("Click  select atom\nDrag  rectangle-select")
         elif self._canvas.align_mode:
-            self._status.showMessage("Align: Click bond align vertically · Ctrl+click align horizontally · Scroll zoom")
-            self._hint.setText("Click bond  align vertically\nCtrl+click  align horizontally")
+            self._status.showMessage("Align: Click bond align vertically · Shift+click align horizontally · Scroll zoom")
+            self._hint.setText("Click bond  align vertically\nShift+click  align horizontally")
         else:
             self._status.showMessage("Left-drag rotate molecule · Right-drag pan · Scroll zoom")
             self._hint.setText("Drag  rotate\nRight-drag  pan\nScroll  zoom")
