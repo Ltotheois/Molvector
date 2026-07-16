@@ -2758,6 +2758,7 @@ class MainWindow(QMainWindow):
         self._build_menubar()
         self._build_toolbar()
         self._setup_builder_toolbar()
+        self._set_build_options_visible(False)
         self._build_statusbar()
         self._load_appearance_config()
         self._apply_shortcut_config()
@@ -3002,32 +3003,44 @@ class MainWindow(QMainWindow):
         self._act_align_btn.triggered.connect(self._toggle_align_mode)
         self._build_toolbar_obj.addAction(self._act_align_btn)
 
-        self._build_toolbar_obj.addSeparator()
-        self._build_toolbar_obj.addWidget(QLabel(" Element: "))
+        self._sep_build1 = self._build_toolbar_obj.addSeparator()
+        self._act_lbl_elem = self._build_toolbar_obj.addWidget(QLabel(" Element: "))
         self._elem_combo = QComboBox()
-        self._elem_combo.setMinimumContentsLength(4)
+        self._elem_combo.setMinimumContentsLength(3)
+        self._elem_combo.setMaximumWidth(60)
         self._elem_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self._common_elements = ["H", "C", "N", "O", "F", "P", "S", "Cl", "Br", "I"]
-        self._elem_combo.addItems(self._common_elements + ["Others…"])
+        self._elem_combo.addItems(self._common_elements + ["..."])
         self._elem_combo.setCurrentText("C")
         self._elem_combo.currentTextChanged.connect(self._on_build_elem_change)
-        self._build_toolbar_obj.addWidget(self._elem_combo)
+        self._act_elem_combo = self._build_toolbar_obj.addWidget(self._elem_combo)
 
-        self._build_toolbar_obj.addSeparator()
+        self._sep_build2 = self._build_toolbar_obj.addSeparator()
         self._auto_h_check = QCheckBox("Auto adjust H")
         self._auto_h_check.setChecked(False)
         self._auto_h_check.toggled.connect(self._on_auto_h_toggle)
-        self._build_toolbar_obj.addWidget(self._auto_h_check)
+        self._act_auto_h = self._build_toolbar_obj.addWidget(self._auto_h_check)
 
-        act_clear = QAction("Clear All", self)
-        act_clear.triggered.connect(self._clear_molecule)
-        self._build_toolbar_obj.addAction(act_clear)
+        self._act_clear = QAction("Clear All", self)
+        self._act_clear.triggered.connect(self._clear_molecule)
+        self._build_toolbar_obj.addAction(self._act_clear)
 
-        self._build_toolbar_obj.addSeparator()
-        act_clean = QAction("Clean Molecule", self)
-        act_clean.setToolTip("Rapidly optimize geometry (Force Field)")
-        act_clean.triggered.connect(self._clean_molecule)
-        self._build_toolbar_obj.addAction(act_clean)
+        self._sep_build3 = self._build_toolbar_obj.addSeparator()
+        self._act_clean = QAction("Clean", self)
+        self._act_clean.setToolTip("Rapidly optimize geometry (Force Field)")
+        self._act_clean.triggered.connect(self._clean_molecule)
+        self._build_toolbar_obj.addAction(self._act_clean)
+
+    def _set_build_options_visible(self, visible: bool):
+        self._sep_build1.setVisible(visible)
+        self._act_lbl_elem.setVisible(visible)
+        self._act_elem_combo.setVisible(visible)
+        self._sep_build2.setVisible(visible)
+        self._act_auto_h.setVisible(visible)
+        self._act_clear.setVisible(visible)
+        self._sep_build3.setVisible(visible)
+        self._act_clean.setVisible(visible)
+        self._build_toolbar_obj.updateGeometry()
 
     # ── toolbar  (only the most frequent actions) ─────────────────────────────
 
@@ -3724,6 +3737,7 @@ class MainWindow(QMainWindow):
             self._act_align_toggle.setChecked(False)
             self._act_align_btn.setChecked(False)
             self._canvas.align_mode = False
+            self._set_build_options_visible(False)
         else:
             self._canvas.selected_atoms.clear()
             self._canvas.request_render()
@@ -3741,6 +3755,7 @@ class MainWindow(QMainWindow):
         self._act_build_toggle.setChecked(enabled)
         self._act_build_btn.setChecked(enabled)
         self._canvas.build_mode = enabled
+        self._set_build_options_visible(enabled)
         self._update_status_for_mode()
         self._canvas._update_cursor(self._canvas._mouse_pos or QPoint(0, 0), Qt.KeyboardModifier.NoModifier)
 
@@ -3749,9 +3764,10 @@ class MainWindow(QMainWindow):
             self._act_select_btn.setChecked(False)
             self._act_select_toggle.setChecked(False)
             self._canvas.selection_mode = False
-            self._act_build_toggle.setChecked(False)
             self._act_build_btn.setChecked(False)
+            self._act_build_toggle.setChecked(False)
             self._canvas.build_mode = False
+            self._set_build_options_visible(False)
         self._act_align_toggle.setChecked(enabled)
         self._act_align_btn.setChecked(enabled)
         self._canvas.align_mode = enabled
@@ -3759,7 +3775,7 @@ class MainWindow(QMainWindow):
         self._canvas._update_cursor(self._canvas._mouse_pos or QPoint(0, 0), Qt.KeyboardModifier.NoModifier)
 
     def _on_build_elem_change(self, elem: str):
-        if elem == "Others…":
+        if elem == "...":
             prev = self._canvas.build_element
             dlg = PeriodicTableDialog(self, prev)
             dlg.elementSelected.connect(self._on_pick_from_periodic_table)
@@ -3771,7 +3787,7 @@ class MainWindow(QMainWindow):
     def _on_pick_from_periodic_table(self, sym: str):
         idx = self._elem_combo.findText(sym)
         if idx < 0:
-            others_idx = self._elem_combo.findText("Others…")
+            others_idx = self._elem_combo.findText("...")
             self._elem_combo.insertItem(others_idx, sym)
         self._elem_combo.setCurrentText(sym)
 
