@@ -75,14 +75,10 @@ from molvector_render import (
     optimize_geometry, HAS_OPENBABEL, calculate_rotational_constants, generate_inchi, check_valence_issues,
 )
 
-# ── platform-aware shortcut modifier prefix ──────────────────────────────────
-IS_MAC = sys.platform == "darwin"
-MOD = "Cmd" if IS_MAC else "Ctrl"
-
-
+# ── shortcut modifier prefix ─────────────────────────────────────────────────
 def _mod(s: str) -> str:
-    """Replace 'Ctrl' with platform-appropriate modifier in a shortcut string."""
-    return s.replace("Ctrl", MOD)
+    """Qt already maps 'Ctrl' → ⌘ on macOS; pass through unchanged."""
+    return s
 
 
 def load_colored_icon(svg_path: str, color: str, size: int = 22) -> QIcon:
