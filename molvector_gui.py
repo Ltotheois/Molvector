@@ -23,10 +23,10 @@ Align mode (A):
 
 Menus:
   File          Open / Save As / Export SVG / Export View / Quick SVG Export / Quit
-  Edit          Appearance (ball size, bond width) / Atom Colours / Reset Colors / Info / Settings / Shortcuts
+  Edit          Appearance / Info / Edit Charge / InChI / Selection Mode / Build Mode / Align Mode / Settings / Shortcuts
   View          Reset View / Preset orientations / Background Colour
   Calculations  Generate G16 Input / Calculate Rotational Constants / Calculation Results
-  Build         Build Mode / Selection Mode / Align Mode / Clean / Undo / Redo / Optimize / Clear All
+  Build         Clean / Undo / Redo / Optimize / Disable Bond Order
   Help          Open Test Molecule / About
 
   Note: On Windows/Linux use Ctrl for shortcuts; on macOS use Cmd.
@@ -448,7 +448,9 @@ class AppearanceDialog(QDialog):
     def __init__(self, atom_scale, bond_width, bond_style, color_overrides,
                  atom_border_mode="scaled", atom_border_scale=1.04, atom_border_width=2.0,
                  bond_color="#444444", lighting_intensity=1.0,
-                 light_position="top-left", show_axes=False, show_principal_axes=False,
+                 light_position="top-left",
+                 glossiness=1.0, whiteness=0.70, roughness=0.5,
+                 show_axes=False, show_principal_axes=False,
                  axes_position="bottom-left", principal_axes_position="bottom-left",
                  live_callback=None, axes_live_callback=None, parent=None):
         super().__init__(parent)
@@ -459,7 +461,9 @@ class AppearanceDialog(QDialog):
         self._orig = (atom_scale, bond_width, bond_style,
                       dict(color_overrides), atom_border_mode, atom_border_scale,
                       atom_border_width, bond_color,
-                      lighting_intensity, light_position, show_axes, show_principal_axes,
+                      lighting_intensity, light_position,
+                      glossiness, whiteness, roughness,
+                      show_axes, show_principal_axes,
                       axes_position, principal_axes_position)
 
         layout = QVBoxLayout(self)
@@ -514,6 +518,45 @@ class AppearanceDialog(QDialog):
         self._light_pos_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._light_pos_btn.clicked.connect(self._pick_light_position)
         form.addRow("Light Position:", self._light_pos_btn)
+
+        # Glossiness
+        self._glossiness_slider = QSlider(Qt.Orientation.Horizontal)
+        self._glossiness_slider.setRange(10, 200)
+        self._glossiness_slider.setValue(int(glossiness * 100))
+        self._glossiness_slider.setFixedWidth(160)
+        self._glossiness_lbl = QLabel(f"{glossiness:.2f}")
+        self._glossiness_slider.valueChanged.connect(self._on_change)
+        self._glossiness_slider.installEventFilter(self)
+        glossiness_row = QHBoxLayout()
+        glossiness_row.addWidget(self._glossiness_slider)
+        glossiness_row.addWidget(self._glossiness_lbl)
+        form.addRow("Glossiness:", glossiness_row)
+
+        # Whiteness
+        self._whiteness_slider = QSlider(Qt.Orientation.Horizontal)
+        self._whiteness_slider.setRange(0, 100)
+        self._whiteness_slider.setValue(int(whiteness * 100))
+        self._whiteness_slider.setFixedWidth(160)
+        self._whiteness_lbl = QLabel(f"{whiteness:.2f}")
+        self._whiteness_slider.valueChanged.connect(self._on_change)
+        self._whiteness_slider.installEventFilter(self)
+        whiteness_row = QHBoxLayout()
+        whiteness_row.addWidget(self._whiteness_slider)
+        whiteness_row.addWidget(self._whiteness_lbl)
+        form.addRow("Whiteness:", whiteness_row)
+
+        # Roughness
+        self._roughness_slider = QSlider(Qt.Orientation.Horizontal)
+        self._roughness_slider.setRange(0, 100)
+        self._roughness_slider.setValue(int(roughness * 100))
+        self._roughness_slider.setFixedWidth(160)
+        self._roughness_lbl = QLabel(f"{roughness:.2f}")
+        self._roughness_slider.valueChanged.connect(self._on_change)
+        self._roughness_slider.installEventFilter(self)
+        roughness_row = QHBoxLayout()
+        roughness_row.addWidget(self._roughness_slider)
+        roughness_row.addWidget(self._roughness_lbl)
+        form.addRow("Roughness:", roughness_row)
 
         # Atom colours + border (init early so _on_change can access them)
         self._color_overrides = color_overrides
@@ -573,7 +616,7 @@ class AppearanceDialog(QDialog):
         self._axes_pos_combo.currentIndexChanged.connect(self._on_axes_change)
         form.addRow("Position:", self._axes_pos_combo)
 
-        self._show_principal_axes_cb = QCheckBox("Show A/B/C Axes")
+        self._show_principal_axes_cb = QCheckBox("Show a/b/c Axes")
         self._show_principal_axes_cb.setChecked(show_principal_axes)
         self._show_principal_axes_cb.toggled.connect(self._on_axes_change)
         form.addRow("", self._show_principal_axes_cb)
@@ -622,6 +665,12 @@ class AppearanceDialog(QDialog):
                 self._bondw_slider.setValue(int(cfg.get("bond_width_px", 10)))
             elif obj is self._lighting_slider:
                 self._lighting_slider.setValue(int(cfg.get("lighting_intensity", 1.0) * 100))
+            elif obj is self._glossiness_slider:
+                self._glossiness_slider.setValue(int(cfg.get("glossiness", 1.0) * 100))
+            elif obj is self._whiteness_slider:
+                self._whiteness_slider.setValue(int(cfg.get("whiteness", 0.70) * 100))
+            elif obj is self._roughness_slider:
+                self._roughness_slider.setValue(int(cfg.get("roughness", 0.5) * 100))
             elif obj is self._border_slider:
                 mode = self._border_mode.currentText().lower()
                 if mode == "constant":
@@ -650,6 +699,9 @@ class AppearanceDialog(QDialog):
         self._ball_lbl.setText(f"{self.ball_scale:.2f}")
         self._bondw_lbl.setText(f"{self.bond_width:.0f}")
         self._lighting_lbl.setText(f"{self.lighting_intensity:.2f}")
+        self._glossiness_lbl.setText(f"{self.glossiness:.2f}")
+        self._whiteness_lbl.setText(f"{self.whiteness:.2f}")
+        self._roughness_lbl.setText(f"{self.roughness:.2f}")
         self._update_border_visibility()
         if self._live_callback and hasattr(self, '_border_slider'):
             self._live_callback(
@@ -657,6 +709,7 @@ class AppearanceDialog(QDialog):
                 self._color_overrides, self.border_mode, self.border_scale,
                 self.border_width, self.bond_color,
                 self.lighting_intensity, self.light_position,
+                self.glossiness, self.whiteness, self.roughness,
             )
 
     def _on_style_change(self, text: str):
@@ -722,6 +775,18 @@ class AppearanceDialog(QDialog):
         return self._light_position
 
     @property
+    def glossiness(self) -> float:
+        return self._glossiness_slider.value() / 100.0
+
+    @property
+    def whiteness(self) -> float:
+        return self._whiteness_slider.value() / 100.0
+
+    @property
+    def roughness(self) -> float:
+        return self._roughness_slider.value() / 100.0
+
+    @property
     def show_axes(self) -> bool:
         return self._show_axes_cb.isChecked()
 
@@ -766,6 +831,9 @@ class AppearanceDialog(QDialog):
             "atom_border_width": self.border_width,
             "lighting_intensity": self.lighting_intensity,
             "light_position": self.light_position,
+            "glossiness": self.glossiness,
+            "whiteness": self.whiteness,
+            "roughness": self.roughness,
             "color_overrides": self._color_overrides,
             "show_axes": self.show_axes,
             "show_principal_axes": self.show_principal_axes,
@@ -789,6 +857,9 @@ class AppearanceDialog(QDialog):
         self._lighting_slider.setValue(100)
         self._light_position = "top-left"
         self._light_pos_btn.setText("Top left")
+        self._glossiness_slider.setValue(100)
+        self._whiteness_slider.setValue(70)
+        self._roughness_slider.setValue(50)
         self._border_mode.setCurrentText("Scaled")
         self._border_slider.setValue(104)
         self._color_overrides = {}
@@ -1872,6 +1943,9 @@ class MoleculeCanvas(QSvgWidget):
         self.color_overrides: dict = {}
         self.lighting_intensity: float = 1.0
         self.light_position: str = "Top left"
+        self.glossiness: float = 1.0
+        self.whiteness: float = 0.70
+        self.roughness: float = 0.5
         self.show_axes: bool = False
         self.show_principal_axes: bool = False
         self.axes_position: str = "bottom-left"
@@ -2026,6 +2100,9 @@ class MoleculeCanvas(QSvgWidget):
                 atom_border_width=self.atom_border_width,
                 lighting_intensity=self.lighting_intensity,
                 light_position=self.light_position,
+                glossiness=self.glossiness,
+                whiteness=self.whiteness,
+                roughness=self.roughness,
                 show_axes=self.show_axes,
                 show_principal_axes=self.show_principal_axes,
                 axes_position=self.axes_position,
@@ -2816,19 +2893,47 @@ class MainWindow(QMainWindow):
         act_appearance.triggered.connect(self._edit_appearance)
         edit_menu.addAction(act_appearance)
 
+        edit_menu.addSeparator()
+
         act_info = QAction("&Info…", self)
         act_info.setShortcut(_mod("Ctrl+I"))
         act_info.triggered.connect(self._show_molecule_info)
         edit_menu.addAction(act_info)
         self._shortcut_actions["info"] = act_info
 
+        act_charge = QAction("Edit &Charge…", self)
+        act_charge.triggered.connect(self._edit_charge)
+        edit_menu.addAction(act_charge)
+
         act_inchi = QAction("&InChI…", self)
         act_inchi.triggered.connect(self._show_inchi)
         edit_menu.addAction(act_inchi)
 
-        act_charge = QAction("Edit &Charge…", self)
-        act_charge.triggered.connect(self._edit_charge)
-        edit_menu.addAction(act_charge)
+        edit_menu.addSeparator()
+
+        act_select_toggle = QAction("Selection Mode", self)
+        act_select_toggle.setCheckable(True)
+        act_select_toggle.setShortcut("S")
+        act_select_toggle.triggered.connect(self._toggle_selection_mode)
+        edit_menu.addAction(act_select_toggle)
+        self._act_select_toggle = act_select_toggle
+        self._shortcut_actions["selection_mode"] = act_select_toggle
+
+        act_toggle = QAction("Build Mode", self)
+        act_toggle.setCheckable(True)
+        act_toggle.setShortcut("B")
+        act_toggle.triggered.connect(self._toggle_build_mode)
+        edit_menu.addAction(act_toggle)
+        self._act_build_toggle = act_toggle
+        self._shortcut_actions["build_mode"] = act_toggle
+
+        act_align_toggle = QAction("Align Mode", self)
+        act_align_toggle.setCheckable(True)
+        act_align_toggle.setShortcut("A")
+        act_align_toggle.triggered.connect(self._toggle_align_mode)
+        edit_menu.addAction(act_align_toggle)
+        self._act_align_toggle = act_align_toggle
+        self._shortcut_actions["align_mode"] = act_align_toggle
 
         edit_menu.addSeparator()
 
@@ -2851,7 +2956,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(act_reset_view)
         self._shortcut_actions["reset_view"] = act_reset_view
 
-        act_reset_xyz = QAction("Reset XYZ &Axes", self)
+        act_reset_xyz = QAction("Set XYZ &Axes", self)
         act_reset_xyz.setShortcut("Shift+R")
         act_reset_xyz.triggered.connect(lambda: self._canvas.reset_xyz_axes())
         view_menu.addAction(act_reset_xyz)
@@ -2898,32 +3003,6 @@ class MainWindow(QMainWindow):
         # ── Build ──
         self._menu_build = mb.addMenu("&Build")
         
-        act_toggle = QAction("Build Mode", self)
-        act_toggle.setCheckable(True)
-        act_toggle.setShortcut("B")
-        act_toggle.triggered.connect(self._toggle_build_mode)
-        self._menu_build.addAction(act_toggle)
-        self._act_build_toggle = act_toggle # reference for toolbar sync
-        self._shortcut_actions["build_mode"] = act_toggle
-
-        act_select_toggle = QAction("Selection Mode", self)
-        act_select_toggle.setCheckable(True)
-        act_select_toggle.setShortcut("S")
-        act_select_toggle.triggered.connect(self._toggle_selection_mode)
-        self._menu_build.addAction(act_select_toggle)
-        self._act_select_toggle = act_select_toggle
-        self._shortcut_actions["selection_mode"] = act_select_toggle
-
-        act_align_toggle = QAction("Align Mode", self)
-        act_align_toggle.setCheckable(True)
-        act_align_toggle.setShortcut("A")
-        act_align_toggle.triggered.connect(self._toggle_align_mode)
-        self._menu_build.addAction(act_align_toggle)
-        self._act_align_toggle = act_align_toggle
-        self._shortcut_actions["align_mode"] = act_align_toggle
-
-        self._menu_build.addSeparator()
-        
         act_clean_m = QAction("Clean Molecule", self)
         act_clean_m.setShortcut(_mod("Ctrl+L"))
         act_clean_m.triggered.connect(self._clean_molecule)
@@ -2952,12 +3031,6 @@ class MainWindow(QMainWindow):
         self._act_bond_order.triggered.connect(self._toggle_bond_order)
         self._menu_build.addAction(self._act_bond_order)
 
-        self._menu_build.addSeparator()
-
-        act_clear_m = QAction("Clear All", self)
-        act_clear_m.triggered.connect(self._clear_molecule)
-        self._menu_build.addAction(act_clear_m)
-
         # ── Help ──
         help_menu = mb.addMenu("&Help")
         act_open_test = QAction("Open Test Molecule", self)
@@ -2976,10 +3049,9 @@ class MainWindow(QMainWindow):
         assets_dir = os.path.join(os.path.dirname(__file__), "assets", "icons")
         self._build_toolbar_obj = QToolBar("Builder")
         self._build_toolbar_obj.setObjectName("builderToolbar")
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._build_toolbar_obj)
         self._build_toolbar_obj.setIconSize(QSize(22, 22))
         self._build_toolbar_obj.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self._build_toolbar_obj.setVisible(True)
+        self._build_toolbar_obj.setVisible(False)
 
         icon_color = '#ccd6f6' if self._current_theme == 'dark' else '#000000'
 
@@ -3067,6 +3139,7 @@ class MainWindow(QMainWindow):
         tb_action("Export view", self._export_view,  _mod("Ctrl+E"), "Export view as PDF/PNG/SVG")
         tb.addSeparator()
         tb_action("Reset view",     lambda: self._canvas.reset_view())
+        tb_action("Clear All",      self._clear_molecule)
         tb.addSeparator()
 
         # Zoom readout
@@ -4047,6 +4120,9 @@ class MainWindow(QMainWindow):
         self._canvas.atom_border_width = cfg.get("atom_border_width", self._canvas.atom_border_width)
         self._canvas.lighting_intensity = cfg.get("lighting_intensity", self._canvas.lighting_intensity)
         self._canvas.light_position = cfg.get("light_position", self._canvas.light_position)
+        self._canvas.glossiness = cfg.get("glossiness", self._canvas.glossiness)
+        self._canvas.whiteness = cfg.get("whiteness", self._canvas.whiteness)
+        self._canvas.roughness = cfg.get("roughness", self._canvas.roughness)
         self._color_overrides = cfg.get("color_overrides", {})
         self._canvas.color_overrides = self._color_overrides
         self._canvas.show_axes = cfg.get("show_axes", self._canvas.show_axes)
@@ -4061,10 +4137,12 @@ class MainWindow(QMainWindow):
                 self._canvas.atom_border_mode, self._canvas.atom_border_scale,
                 self._canvas.atom_border_width, self._canvas.bond_color,
                 self._canvas.lighting_intensity, self._canvas.light_position,
+                self._canvas.glossiness, self._canvas.whiteness,
+                self._canvas.roughness,
                 self._canvas.show_axes, self._canvas.show_principal_axes,
                 self._canvas.axes_position, self._canvas.principal_axes_position)
 
-        def _live_update(ball, bw, style, colors, border_mode, border_scale, border_width, bcol, lighting, pos):
+        def _live_update(ball, bw, style, colors, border_mode, border_scale, border_width, bcol, lighting, pos, gloss, white, rough):
             self._canvas.atom_scale = ball
             self._canvas.bond_width_px = bw
             self._canvas.bond_style = style
@@ -4074,6 +4152,9 @@ class MainWindow(QMainWindow):
             self._canvas.atom_border_width = border_width
             self._canvas.lighting_intensity = lighting
             self._canvas.light_position = pos
+            self._canvas.glossiness = gloss
+            self._canvas.whiteness = white
+            self._canvas.roughness = rough
             self._color_overrides = colors
             self._canvas.color_overrides = colors
             if self._canvas.molecule:
@@ -4099,6 +4180,9 @@ class MainWindow(QMainWindow):
             self._canvas.atom_border_width = dlg.border_width
             self._canvas.lighting_intensity = dlg.lighting_intensity
             self._canvas.light_position = dlg.light_position
+            self._canvas.glossiness = dlg.glossiness
+            self._canvas.whiteness = dlg.whiteness
+            self._canvas.roughness = dlg.roughness
             self._canvas.show_axes = dlg.show_axes
             self._canvas.show_principal_axes = dlg.show_principal_axes
             self._canvas.axes_position = dlg.axes_position
@@ -4115,6 +4199,9 @@ class MainWindow(QMainWindow):
              self._canvas.atom_border_width, self._canvas.bond_color,
              self._canvas.lighting_intensity,
              self._canvas.light_position,
+             self._canvas.glossiness,
+             self._canvas.whiteness,
+             self._canvas.roughness,
              self._canvas.show_axes,
              self._canvas.show_principal_axes,
              self._canvas.axes_position,

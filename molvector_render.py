@@ -950,6 +950,26 @@ def interpolate_color(c1: str, c2: str, t: float) -> str:
     r2, g2, b2 = hex_to_rgb(c2)
     return rgb_to_hex(r1 + (r2-r1)*t, g1 + (g2-g1)*t, b1 + (b2-b1)*t)
 
+def compute_gradient_stops(
+    base: str, dark: str, li: float,
+    glossiness: float, whiteness: float, roughness: float,
+    edge_fn=None,
+):
+    if edge_fn is None:
+        edge_fn = lambda b, d, l: darken(b, 0.65 * l)
+    rv = 1.0 - roughness
+    rs = 1.5 - rv
+    ws = whiteness / 0.70
+    rf = 0.3 + rv * 1.4
+    pos = [min(1.0, p * rf * glossiness) for p in (0.18, 0.48, 0.78)]
+    return [
+        (0.00,  lighten(base, whiteness * li * rs)),
+        (pos[0], lighten(base, 0.40 * ws * li * rs)),
+        (pos[1], lighten(base, 0.15 * ws * li * rs)),
+        (pos[2], base),
+        (1.00,  edge_fn(base, dark, li * rs)),
+    ]
+
 # Light position presets: maps name -> (gradient_cx, gradient_cy, Lx, Ly, Lz)
 LIGHT_POSITIONS = {
     "top-left":      ("0.33", "0.28",  -0.34, -0.44,  0.83),
@@ -1465,6 +1485,9 @@ def render_molecule(
     atom_border_width: float = 2.0,
     lighting_intensity: float = 1.0,
     light_position: str = "top-left",
+    glossiness: float = 1.0,
+    whiteness: float = 0.70,
+    roughness: float = 0.5,
     show_axes: bool = False,
     show_principal_axes: bool = False,
     axes_position: str = "bottom-left",
@@ -1535,11 +1558,9 @@ def render_molecule(
         g = dwg.radialGradient(id=gid, center=(grad_cx, grad_cy), r="0.68")
         g["fx"]=grad_cx; g["fy"]=grad_cy
         g["gradientUnits"] = "objectBoundingBox"
-        g.add_stop_color("0%",   lighten(base,0.70*li), 1.0)
-        g.add_stop_color("18%",  lighten(base,0.40*li), 1.0)
-        g.add_stop_color("48%",  lighten(base,0.15*li), 1.0)
-        g.add_stop_color("78%",  base,                  1.0)
-        g.add_stop_color("100%", darken(base,0.65*li),  1.0)
+        for pct, color in compute_gradient_stops(
+                base, dark, li, glossiness, whiteness, roughness):
+            g.add_stop_color(f"{pct*100:.1f}%", color, 1.0)
         defs.add(g)
         registered.add(gid)
         return gid
@@ -1741,13 +1762,9 @@ def render_molecule(
             def get_color_from_ratio(r: float) -> str:
                 d = 1.0 - r
                 li = lighting_intensity
-                stops = [
-                    (0.00, lighten(base, 0.70*li)),
-                    (0.18, lighten(base, 0.40*li)),
-                    (0.48, lighten(base, 0.15*li)),
-                    (0.78, base),
-                    (1.00, interpolate_color(base, dark, li))
-                ]
+                stops = compute_gradient_stops(
+                    base, dark, li, glossiness, whiteness, roughness,
+                    edge_fn=lambda b, d, l: interpolate_color(b, d, l))
                 if d <= 0: return stops[0][1]
                 if d >= 1: return stops[-1][1]
                 for i in range(len(stops)-1):
@@ -1809,7 +1826,9 @@ def render_molecule(
             def mat_color(base, dark, ratio):
                 d = 1.0 - ratio
                 li = lighting_intensity
-                stops = [(0.00, lighten(base, 0.70*li)), (0.18, lighten(base, 0.40*li)), (0.48, lighten(base, 0.15*li)), (0.78, base), (1.00, interpolate_color(base, dark, li))]
+                stops = compute_gradient_stops(
+                    base, dark, li, glossiness, whiteness, roughness,
+                    edge_fn=lambda b, d, l: interpolate_color(b, d, l))
                 if d <= 0: return stops[0][1]
                 if d >= 1: return stops[-1][1]
                 for i in range(len(stops)-1):
@@ -1957,9 +1976,9 @@ def render_molecule(
         else:
             origin_x, origin_y = margin, canvas_h - margin
         for i, col, lbl in [
-            (0, "#ff8800", "A"),
-            (1, "#cc44cc", "B"),
-            (2, "#00bbbb", "C"),
+            (0, "#ff8800", "a"),
+            (1, "#cc44cc", "b"),
+            (2, "#00bbbb", "c"),
         ]:
             vec = eigvecs[:, i]
             rv = rot @ vec
